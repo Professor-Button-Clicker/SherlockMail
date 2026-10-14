@@ -97,51 +97,21 @@
               <input type="text" id="proj-name" required placeholder="e.g. Case 2024-001 Email Preservation">
             </div>
             <div class="form-group">
-              <label>Target Email Address</label>
-              <div style="display:flex;gap:8px;max-width:500px">
-                <input type="email" id="proj-email" required placeholder="target@example.com" style="flex:1">
-                <button type="button" class="btn btn-secondary btn-sm" onclick="detectEmailProvider()">Detect Provider</button>
-              </div>
-              <div id="provider-result"></div>
+              <label>Case / Matter ID</label>
+              <input type="text" id="proj-case-id" placeholder="2024-CV-001" style="max-width:500px">
+            </div>
+            <div class="form-group">
+              <label>Custodian Name</label>
+              <input type="text" id="proj-custodian" placeholder="Name of the data custodian" style="max-width:500px">
             </div>
             <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
               <div class="form-group">
-                <label>Provider Type</label>
-                <select id="proj-provider">
-                  <option value="imap">IMAP</option>
-                  <option value="gmail_api">Gmail API</option>
-                  <option value="graph_api">Microsoft Graph API</option>
-                  <option value="ews">Exchange Web Services (EWS)</option>
-                  <option value="pop3">POP3</option>
-                </select>
+                <label>Examiner ID</label>
+                <input type="text" id="proj-examiner-id" placeholder="Examiner ID">
               </div>
-              <div class="form-group">
-                <label>Auth Method</label>
-                <select id="proj-auth-method">
-                  <option value="password">Password</option>
-                  <option value="app-password">App-Specific Password</option>
-                  <option value="oauth2">OAuth 2.0</option>
-                </select>
-              </div>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
-              <div class="form-group">
-                <label>Case Name</label>
-                <input type="text" id="proj-case-name" placeholder="Smith v. Jones">
-              </div>
-              <div class="form-group">
-                <label>Case / Matter ID</label>
-                <input type="text" id="proj-case-id" placeholder="2024-CV-001">
-              </div>
-            </div>
-            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
               <div class="form-group">
                 <label>Examiner Name</label>
                 <input type="text" id="proj-examiner" placeholder="Examiner name">
-              </div>
-              <div class="form-group">
-                <label>Agency / Firm</label>
-                <input type="text" id="proj-agency" placeholder="Agency or firm name">
               </div>
             </div>
             <div style="margin-top:24px;display:flex;gap:12px">

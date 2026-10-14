@@ -96,12 +96,12 @@ export class ForensicDatabase {
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        target_email TEXT NOT NULL,
-        provider_type TEXT,
-        case_name TEXT,
         case_id TEXT,
+        custodian_name TEXT,
+        examiner_id TEXT,
         examiner_name TEXT,
-        agency TEXT,
+        target_email TEXT,
+        provider_type TEXT,
         status TEXT DEFAULT 'created',
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
@@ -270,10 +270,10 @@ export class ForensicDatabase {
 
   createProject(project) {
     this.db.run(
-      `INSERT INTO projects (id, name, target_email, provider_type, case_name, case_id, examiner_name, agency, config)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [project.id, project.name, project.targetEmail, project.providerType,
-       project.caseName, project.caseId, project.examinerName, project.agency,
+      `INSERT INTO projects (id, name, case_id, custodian_name, examiner_id, examiner_name, target_email, config)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [project.id, project.name, project.caseId, project.custodianName,
+       project.examinerId, project.examinerName, project.targetEmail || '',
        JSON.stringify(project.config || {})]
     );
     this.#save();

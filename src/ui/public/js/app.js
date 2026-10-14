@@ -129,7 +129,7 @@ async function loadProjects() {
   container.innerHTML = projects.map(p => `
     <div class="project-item ${currentProject?.id === p.id ? 'active' : ''}" onclick="selectProject('${p.id}')">
       <div class="project-name">${esc(p.name)}</div>
-      <div class="project-email">${esc(p.target_email)}</div>
+      <div class="project-email">${esc(p.custodian_name || p.target_email || '')}</div>
       <span class="project-status status-${p.status}">${p.status.toUpperCase()}</span>
     </div>
   `).join('');
@@ -308,44 +308,17 @@ async function createProject(e) {
   e.preventDefault();
   const project = {
     name: document.getElementById('proj-name').value,
-    targetEmail: document.getElementById('proj-email').value,
-    providerType: document.getElementById('proj-provider').value,
-    caseName: document.getElementById('proj-case-name').value,
     caseId: document.getElementById('proj-case-id').value,
-    examinerName: document.getElementById('proj-examiner').value,
-    agency: document.getElementById('proj-agency').value
+    custodianName: document.getElementById('proj-custodian').value,
+    examinerId: document.getElementById('proj-examiner-id').value,
+    examinerName: document.getElementById('proj-examiner').value
   };
 
   const result = await api('/projects', { method: 'POST', body: project });
   toast(`Project "${project.name}" created`);
   document.getElementById('new-project-form').reset();
-  document.getElementById('provider-result').innerHTML = '';
   await selectProject(result.id);
   loadSystemInfo();
-}
-
-async function detectEmailProvider() {
-  const email = document.getElementById('proj-email').value;
-  if (!email) return;
-  const el = document.getElementById('provider-result');
-  el.innerHTML = '<span style="color:var(--text-muted)">Detecting provider...</span>';
-
-  const result = await api('/detect-provider', { method: 'POST', body: { email } });
-
-  if (result.profile) {
-    document.getElementById('proj-provider').value = result.profile.type || 'imap';
-    el.innerHTML = `
-      <div class="provider-result">
-        <div class="provider-name">${esc(result.profile.name)}</div>
-        <div class="provider-detail">Detection method: ${result.method} | Type: ${result.profile.type}</div>
-        ${result.profile.supportsOAuth ? '<div class="provider-detail" style="color:var(--success)">Supports OAuth 2.0</div>' : ''}
-        ${result.profile.requiresAppPassword ? '<div class="provider-detail" style="color:var(--warning)">Requires app-specific password</div>' : ''}
-        ${result.profile.requiresBridge ? '<div class="provider-detail" style="color:var(--warning)">Requires ProtonMail Bridge</div>' : ''}
-        <div class="provider-detail">IMAP: ${result.profile.imap?.host}:${result.profile.imap?.port}</div>
-      </div>`;
-  } else {
-    el.innerHTML = '<span style="color:var(--danger)">Could not detect provider</span>';
-  }
 }
 
 // --- Search ---
@@ -832,7 +805,7 @@ function wizBuildPreview() {
     <div class="wiz-preview-card">
       <div class="wiz-preview-title">Project</div>
       <div class="wiz-preview-value">${esc(currentProject?.name || 'No project selected')}</div>
-      <div class="wiz-preview-sub">${esc(currentProject?.target_email || '')}</div>
+      <div class="wiz-preview-sub">${esc(currentProject?.custodian_name || '')}</div>
     </div>
     <div class="wiz-preview-card">
       <div class="wiz-preview-title">Connection</div>

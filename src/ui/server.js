@@ -36,13 +36,13 @@ async function start() {
   });
 
   app.post('/api/projects', (req, res) => {
-    const { name, targetEmail, providerType, caseName, caseId, examinerName, agency } = req.body;
+    const { name, caseId, custodianName, examinerId, examinerName } = req.body;
     const id = uuid();
     const project = db.createProject({
-      id, name, targetEmail, providerType, caseName, caseId, examinerName, agency, config: req.body.config || {}
+      id, name, caseId, custodianName, examinerId, examinerName, config: req.body.config || {}
     });
     const custody = new ChainOfCustody(db, id, examinerName || 'Unknown');
-    custody.logProjectCreated({ targetEmail, providerType, caseName, caseId });
+    custody.logProjectCreated({ caseId, custodianName, examinerId });
     res.json({ id, ...project });
   });
 
