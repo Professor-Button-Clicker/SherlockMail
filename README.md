@@ -12,7 +12,7 @@ Built for court-admissible evidence collection following NIST SP 800-86, ISO/IEC
 
 Download the latest release from [Releases](https://github.com/Professor-Button-Clicker/SherlockMail/releases):
 
-1. Download and extract `SherlockMail-v2.0.0-win-x64.zip`
+1. Download and extract `SherlockMail-v1.1.0-win-x64.zip`
 2. Run `SherlockMail.exe` to launch the dashboard at `http://localhost:3858`
 3. No .NET runtime or installation required — fully self-contained
 
