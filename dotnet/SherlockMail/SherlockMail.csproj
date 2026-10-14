@@ -7,7 +7,7 @@
     <AssemblyName>SherlockMail</AssemblyName>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <Description>Forensic email collection tool for legal, compliance, and investigative professionals</Description>
   </PropertyGroup>
 

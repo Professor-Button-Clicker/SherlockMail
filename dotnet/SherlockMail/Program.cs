@@ -14,7 +14,7 @@ var license = CertificateLicensing.ValidateLicense(
 
 if (args.Length == 0 || args[0] == "serve" || args[0] == "dashboard")
 {
-    Console.WriteLine($"  SherlockMail v1.1.0 ({license.Edition})");
+    Console.WriteLine($"  SherlockMail v1.2.0 ({license.Edition})");
     if (!string.IsNullOrEmpty(license.Message))
         Console.WriteLine($"  {license.Message}");
 
