@@ -1,9 +1,10 @@
 using System.CommandLine;
+using System.Net.Http;
 using Photino.NET;
 using SherlockMail.Cli;
 using SherlockMail.Licensing;
 
-var exeDir = AppContext.BaseDirectory;
+var exeDir = Path.GetDirectoryName(Environment.ProcessPath) ?? AppContext.BaseDirectory;
 var dbPath = Path.Combine(exeDir, "data", "fmc.sqlite");
 var port = 3858;
 
@@ -20,17 +21,32 @@ if (args.Length == 0 || args[0] == "dashboard")
         Console.WriteLine($"  {license.Message}");
 
     var wwwroot = Path.Combine(exeDir, "wwwroot");
+    Console.WriteLine($"  wwwroot: {wwwroot}");
+    Console.WriteLine($"  Exists:  {Directory.Exists(wwwroot)}");
 
     var cts = new CancellationTokenSource();
     _ = Task.Run(() => SherlockMail.Web.WebServer.RunAsync(dbPath, port, wwwroot, cts.Token));
 
-    await Task.Delay(1500);
+    var serverUrl = $"http://localhost:{port}";
+    using var http = new HttpClient();
+    for (int i = 0; i < 30; i++)
+    {
+        try
+        {
+            var resp = await http.GetAsync(serverUrl);
+            if (resp.IsSuccessStatusCode) break;
+        }
+        catch { }
+        await Task.Delay(500);
+    }
+
+    Console.WriteLine($"  Server ready at {serverUrl}");
 
     var window = new PhotinoWindow()
         .SetTitle($"SherlockMail v1.1.0 ({license.Edition})")
         .SetSize(1400, 900)
         .Center()
-        .Load($"http://localhost:{port}");
+        .Load(serverUrl);
 
     window.WaitForClose();
 
