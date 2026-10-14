@@ -118,6 +118,9 @@ export class AcquisitionEngine extends EventEmitter {
     if (exclude.length) {
       selected = selected.filter(f => !exclude.some(p => f.path.startsWith(p)));
     }
+    if (this.config.targetedUids) {
+      selected = selected.filter(f => this.config.targetedUids[f.path]?.length > 0);
+    }
     return selected;
   }
 
@@ -148,11 +151,14 @@ export class AcquisitionEngine extends EventEmitter {
       return;
     }
 
-    this.custody.logFolderEnumerated(acquisitionId, folder.path, status.messages);
-    this.stats.totalMessages += status.messages;
-    this.emit('folder_status', { folder: folder.path, total: status.messages });
+    const targetCount = (this.config.targetedUids && this.config.targetedUids[folder.path])
+      ? this.config.targetedUids[folder.path].length
+      : status.messages;
+    this.custody.logFolderEnumerated(acquisitionId, folder.path, targetCount);
+    this.stats.totalMessages += targetCount;
+    this.emit('folder_status', { folder: folder.path, total: targetCount });
 
-    if (status.messages === 0) {
+    if (targetCount === 0) {
       this.emit('folder_complete', { folder: folder.path, acquired: 0 });
       return;
     }
@@ -163,8 +169,13 @@ export class AcquisitionEngine extends EventEmitter {
     let folderAcquired = 0;
     const batch = [];
 
+    const fetchOpts = {};
+    if (this.config.targetedUids && this.config.targetedUids[folder.path]) {
+      fetchOpts.uidRange = this.config.targetedUids[folder.path].join(',');
+    }
+
     try {
-      for await (const rawMsg of client.fetchMessages(folder.path)) {
+      for await (const rawMsg of client.fetchMessages(folder.path, fetchOpts)) {
         if (this.cancelled) break;
 
         try {

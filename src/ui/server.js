@@ -300,10 +300,68 @@ async function start() {
     }
   });
 
+  // --- Wizard: Pre-Collection Search ---
+  app.post('/api/search-remote', async (req, res) => {
+    const { connection, folders, criteria } = req.body;
+
+    const client = new ForensicImapClient({
+      host: connection.host,
+      port: connection.port || 993,
+      tls: connection.tls !== false,
+      email: connection.email,
+      username: connection.username || connection.email,
+      password: connection.password,
+      appPassword: connection.appPassword
+    });
+
+    try {
+      await client.connect();
+      const results = [];
+
+      for (const folderPath of folders) {
+        const uids = await client.searchInPlace(folderPath, criteria);
+        if (!uids.length) continue;
+
+        const lock = await client.client.getMailboxLock(folderPath);
+        try {
+          const uidList = uids.join(',');
+          for await (const msg of client.client.fetch(uidList, {
+            uid: true,
+            envelope: true,
+            size: true,
+            flags: true,
+            internalDate: true
+          }, { uid: true })) {
+            results.push({
+              uid: msg.uid,
+              folder: folderPath,
+              from: msg.envelope?.from?.[0]?.address || '',
+              fromName: msg.envelope?.from?.[0]?.name || '',
+              to: (msg.envelope?.to || []).map(a => a.address).join(', '),
+              subject: msg.envelope?.subject || '(no subject)',
+              date: msg.envelope?.date?.toISOString() || msg.internalDate?.toISOString() || '',
+              size: msg.size || 0,
+              flags: [...(msg.flags || [])],
+              hasAttachment: !!(msg.flags && msg.flags.has && msg.flags.has('\\Flagged'))
+            });
+          }
+        } finally {
+          lock.release();
+        }
+      }
+
+      await client.disconnect();
+      res.json({ results, total: results.length });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // --- Wizard: Start Collection ---
   app.post('/api/start-collection', async (req, res) => {
     const { projectId, connection, selectedFolders, query, outputFormats, pstSizeGB,
-            containerType, collectDriveLinks, collectModernAttachments, outputDir } = req.body;
+            containerType, collectDriveLinks, collectModernAttachments, outputDir,
+            targetedUids } = req.body;
 
     const project = db.getProject(projectId);
     if (!project) return res.status(404).json({ error: 'Project not found' });
@@ -319,6 +377,7 @@ async function start() {
       appPassword: connection.appPassword,
       folders: selectedFolders || [],
       query: query || null,
+      targetedUids: targetedUids || null,
       outputDir: outputDir || join(exeDir, 'output', projectId),
       collectDriveLinks: collectDriveLinks !== false,
       collectModernAttachments: collectModernAttachments !== false,

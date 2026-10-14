@@ -10,6 +10,8 @@ let wizSelectedFolders = [];
 let wizCollectionId = null;
 let wizProgressTimer = null;
 let wizOutputDir = '';
+let wizSearchResults = [];
+let wizSearchSelectedUids = null;
 
 // --- Init ---
 document.addEventListener('DOMContentLoaded', () => {
@@ -437,7 +439,7 @@ async function verifyChain() {
 // ============================================================
 
 function wizGoToStep(step) {
-  if (step < 1 || step > 9) return;
+  if (step < 1 || step > 10) return;
   wizStep = step;
 
   document.querySelectorAll('.wizard-step').forEach(el => {
@@ -454,22 +456,22 @@ function wizGoToStep(step) {
   const nextBtn = document.getElementById('wiz-btn-next');
   backBtn.style.visibility = step === 1 ? 'hidden' : 'visible';
 
-  if (step === 6) {
+  if (step === 7) {
     nextBtn.style.display = 'none';
     backBtn.style.display = 'none';
-  } else if (step === 9) {
+  } else if (step === 10) {
     nextBtn.textContent = 'Finish';
     nextBtn.style.display = '';
     backBtn.style.display = '';
   } else {
-    nextBtn.textContent = step === 5 ? 'Start Collection' : 'Next';
+    nextBtn.textContent = step === 6 ? 'Start Collection' : 'Next';
     nextBtn.style.display = '';
     backBtn.style.display = '';
   }
 
-  document.getElementById('wiz-step-indicator').textContent = `Step ${step} of 9`;
+  document.getElementById('wiz-step-indicator').textContent = `Step ${step} of 10`;
 
-  if (step === 5) wizBuildPreview();
+  if (step === 6) wizBuildPreview();
 }
 
 function wizNext() {
@@ -480,12 +482,12 @@ function wizNext() {
     wizSaveConnection();
   }
 
-  if (wizStep === 5) {
+  if (wizStep === 6) {
     wizStartCollection();
     return;
   }
 
-  if (wizStep === 9) {
+  if (wizStep === 10) {
     toast('Workflow complete');
     wizGoToStep(1);
     wizResetState();
@@ -496,8 +498,8 @@ function wizNext() {
 }
 
 function wizBack() {
-  if (wizStep === 7) {
-    wizGoToStep(5);
+  if (wizStep === 8) {
+    wizGoToStep(6);
     return;
   }
   wizGoToStep(wizStep - 1);
@@ -625,7 +627,172 @@ function wizGetSelectedFolders() {
   return Array.from(cbs).map(cb => cb.dataset.path);
 }
 
-// --- Step 5: Preview ---
+// --- Step 5: Pre-Collection Search ---
+async function wizRunSearch() {
+  wizSaveConnection();
+  wizSelectedFolders = wizGetSelectedFolders();
+
+  if (!wizSelectedFolders.length) { toast('Select folders first (Step 4)'); return; }
+
+  const criteria = {};
+  const sf = document.getElementById('wiz-search-from').value.trim();
+  const st = document.getElementById('wiz-search-to').value.trim();
+  const ss = document.getElementById('wiz-search-subject').value.trim();
+  const sb = document.getElementById('wiz-search-body').value.trim();
+  const sdf = document.getElementById('wiz-search-date-from').value;
+  const sdt = document.getElementById('wiz-search-date-to').value;
+  const sunread = document.getElementById('wiz-search-unread').checked;
+  const sflagged = document.getElementById('wiz-search-flagged').checked;
+
+  if (sf) criteria.from = sf;
+  if (st) criteria.to = st;
+  if (ss) criteria.subject = ss;
+  if (sb) criteria.body = sb;
+  if (sdf) criteria.since = sdf;
+  if (sdt) criteria.before = sdt;
+  if (sunread) criteria.seen = false;
+  if (sflagged) criteria.flagged = true;
+
+  if (!Object.keys(criteria).length) { toast('Enter at least one search criterion'); return; }
+
+  const statusEl = document.getElementById('wiz-search-status');
+  const resultsEl = document.getElementById('wiz-search-results');
+  statusEl.innerHTML = '<span style="color:var(--accent)">Searching...</span>';
+  resultsEl.innerHTML = '<div style="padding:20px;color:var(--accent)">Searching across ' + wizSelectedFolders.length + ' folder(s)...</div>';
+
+  try {
+    const data = await api('/search-remote', {
+      method: 'POST',
+      body: { connection: wizConnection, folders: wizSelectedFolders, criteria }
+    });
+
+    wizSearchResults = data.results || [];
+    statusEl.innerHTML = `<span style="color:var(--success)">${wizSearchResults.length} message(s) found</span>`;
+    wizRenderSearchResults();
+  } catch (err) {
+    statusEl.innerHTML = `<span style="color:var(--danger)">Search failed: ${esc(err.message || 'Error')}</span>`;
+    resultsEl.innerHTML = '';
+  }
+}
+
+function wizRenderSearchResults() {
+  const el = document.getElementById('wiz-search-results');
+  if (!wizSearchResults.length) {
+    el.innerHTML = '<div class="empty-state" style="height:120px"><p>No messages matched your search criteria.</p></div>';
+    wizSearchSelectedUids = null;
+    return;
+  }
+
+  const rows = wizSearchResults.map((m, i) => {
+    const d = m.date ? new Date(m.date).toLocaleDateString() : '';
+    const sizeKB = (m.size / 1024).toFixed(1);
+    const fromDisplay = m.fromName ? `${esc(m.fromName)} &lt;${esc(m.from)}&gt;` : esc(m.from);
+    return `<tr>
+      <td><input type="checkbox" class="wiz-sr-cb" data-idx="${i}" checked></td>
+      <td title="${esc(m.from)}">${fromDisplay}</td>
+      <td title="${esc(m.to)}">${esc(m.to)}</td>
+      <td>${esc(m.subject)}</td>
+      <td>${d}</td>
+      <td>${sizeKB} KB</td>
+      <td title="${esc(m.folder)}">${esc(m.folder.split('/').pop() || m.folder)}</td>
+    </tr>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div style="font-weight:600;color:var(--text-primary)">${wizSearchResults.length} message(s) found</div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-secondary btn-sm" onclick="wizSearchSelectAll()">Select All</button>
+        <button class="btn btn-secondary btn-sm" onclick="wizSearchDeselectAll()">Deselect All</button>
+        <button class="btn btn-primary btn-sm" onclick="wizApplySearchSelection()">Use Selected (${wizSearchResults.length})</button>
+      </div>
+    </div>
+    <div style="overflow-x:auto;max-height:400px;overflow-y:auto;border:1px solid var(--border);border-radius:8px">
+      <table class="guide-table" style="margin:0;font-size:12px">
+        <thead><tr>
+          <th style="width:30px"><input type="checkbox" id="wiz-sr-all" checked onchange="wizSearchToggleAll(this.checked)"></th>
+          <th>From</th><th>To</th><th>Subject</th><th>Date</th><th>Size</th><th>Folder</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div style="margin-top:8px;font-size:12px;color:var(--text-muted)" id="wiz-sr-count">
+      ${wizSearchResults.length} of ${wizSearchResults.length} selected for collection
+    </div>`;
+
+  el.querySelectorAll('.wiz-sr-cb').forEach(cb => {
+    cb.addEventListener('change', wizUpdateSearchCount);
+  });
+}
+
+function wizSearchSelectAll() {
+  document.querySelectorAll('.wiz-sr-cb').forEach(cb => cb.checked = true);
+  const allCb = document.getElementById('wiz-sr-all');
+  if (allCb) allCb.checked = true;
+  wizUpdateSearchCount();
+}
+
+function wizSearchDeselectAll() {
+  document.querySelectorAll('.wiz-sr-cb').forEach(cb => cb.checked = false);
+  const allCb = document.getElementById('wiz-sr-all');
+  if (allCb) allCb.checked = false;
+  wizUpdateSearchCount();
+}
+
+function wizSearchToggleAll(checked) {
+  document.querySelectorAll('.wiz-sr-cb').forEach(cb => cb.checked = checked);
+  wizUpdateSearchCount();
+}
+
+function wizUpdateSearchCount() {
+  const total = document.querySelectorAll('.wiz-sr-cb').length;
+  const selected = document.querySelectorAll('.wiz-sr-cb:checked').length;
+  const countEl = document.getElementById('wiz-sr-count');
+  if (countEl) countEl.textContent = `${selected} of ${total} selected for collection`;
+  const applyBtn = document.querySelector('#wiz-search-results .btn-primary');
+  if (applyBtn) applyBtn.textContent = `Use Selected (${selected})`;
+}
+
+function wizApplySearchSelection() {
+  const selected = document.querySelectorAll('.wiz-sr-cb:checked');
+  if (!selected.length) { toast('Select at least one message'); return; }
+
+  const uidsByFolder = {};
+  selected.forEach(cb => {
+    const msg = wizSearchResults[parseInt(cb.dataset.idx)];
+    if (!uidsByFolder[msg.folder]) uidsByFolder[msg.folder] = [];
+    uidsByFolder[msg.folder].push(msg.uid);
+  });
+
+  wizSearchSelectedUids = uidsByFolder;
+  toast(`${selected.length} message(s) selected for collection`);
+  wizGoToStep(6);
+}
+
+function wizClearSearch() {
+  document.getElementById('wiz-search-from').value = '';
+  document.getElementById('wiz-search-to').value = '';
+  document.getElementById('wiz-search-subject').value = '';
+  document.getElementById('wiz-search-body').value = '';
+  document.getElementById('wiz-search-date-from').value = '';
+  document.getElementById('wiz-search-date-to').value = '';
+  document.getElementById('wiz-search-unread').checked = false;
+  document.getElementById('wiz-search-flagged').checked = false;
+  document.getElementById('wiz-search-status').innerHTML = '';
+  document.getElementById('wiz-search-results').innerHTML =
+    '<div class="empty-state" style="height:150px"><p>Enter search criteria and click "Search Server" to find messages before collection.<br>Or click "Skip" to collect all messages from selected folders.</p></div>';
+  wizSearchResults = [];
+  wizSearchSelectedUids = null;
+}
+
+function wizSkipSearch() {
+  wizSearchSelectedUids = null;
+  wizSearchResults = [];
+  toast('Search skipped — all messages in selected folders will be collected');
+  wizGoToStep(6);
+}
+
+// --- Step 6: Preview ---
 function wizBuildPreview() {
   wizSelectedFolders = wizGetSelectedFolders();
 
@@ -668,8 +835,8 @@ function wizBuildPreview() {
     </div>
     <div class="wiz-preview-card highlight">
       <div class="wiz-preview-title">Estimated Items</div>
-      <div class="wiz-preview-value" style="font-size:32px;color:var(--accent)">${totalMessages.toLocaleString()}</div>
-      <div class="wiz-preview-sub">${wizSelectedFolders.length} folder(s) selected</div>
+      <div class="wiz-preview-value" style="font-size:32px;color:var(--accent)">${wizSearchSelectedUids ? Object.values(wizSearchSelectedUids).reduce((s, a) => s + a.length, 0).toLocaleString() : totalMessages.toLocaleString()}</div>
+      <div class="wiz-preview-sub">${wizSearchSelectedUids ? 'Targeted via pre-collection search' : wizSelectedFolders.length + ' folder(s) — all messages'}</div>
     </div>
     <div class="wiz-preview-card">
       <div class="wiz-preview-title">Output Formats</div>
@@ -692,7 +859,7 @@ function wizBuildPreview() {
   `;
 }
 
-// --- Step 6: Start collection ---
+// --- Step 7: Start collection ---
 async function wizStartCollection() {
   if (!currentProject) { toast('Select a project first'); return; }
 
@@ -712,10 +879,11 @@ async function wizStartCollection() {
     collectDriveLinks: document.getElementById('wiz-collect-drive').checked,
     collectModernAttachments: document.getElementById('wiz-collect-modern').checked,
     outputDir: wizOutputDir || undefined,
-    query: wizBuildQuery()
+    query: wizBuildQuery(),
+    targetedUids: wizSearchSelectedUids || null
   };
 
-  wizGoToStep(6);
+  wizGoToStep(7);
 
   try {
     const result = await api('/start-collection', { method: 'POST', body });
@@ -797,7 +965,7 @@ function wizPollProgress() {
 
         setTimeout(() => {
           wizShowResults(p);
-          wizGoToStep(7);
+          wizGoToStep(8);
         }, 1500);
       }
     } catch {
@@ -947,6 +1115,8 @@ function wizResetState() {
   wizFolders = [];
   wizSelectedFolders = [];
   wizOutputDir = '';
+  wizSearchResults = [];
+  wizSearchSelectedUids = null;
   if (wizProgressTimer) { clearInterval(wizProgressTimer); wizProgressTimer = null; }
   document.getElementById('wiz-progress-fill').style.width = '0%';
   document.getElementById('wiz-progress-fill').classList.remove('complete');

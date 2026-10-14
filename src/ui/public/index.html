@@ -195,15 +195,17 @@
             <div class="wizard-step-line"></div>
             <div class="wizard-step" data-step="4"><span class="step-num">4</span><span class="step-label">Folders</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="5"><span class="step-num">5</span><span class="step-label">Preview</span></div>
+            <div class="wizard-step" data-step="5"><span class="step-num">5</span><span class="step-label">Search</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="6"><span class="step-num">6</span><span class="step-label">Collecting</span></div>
+            <div class="wizard-step" data-step="6"><span class="step-num">6</span><span class="step-label">Preview</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="7"><span class="step-num">7</span><span class="step-label">Results</span></div>
+            <div class="wizard-step" data-step="7"><span class="step-num">7</span><span class="step-label">Collecting</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="8"><span class="step-num">8</span><span class="step-label">QC Verify</span></div>
+            <div class="wizard-step" data-step="8"><span class="step-num">8</span><span class="step-label">Results</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="9"><span class="step-num">9</span><span class="step-label">Transfer</span></div>
+            <div class="wizard-step" data-step="9"><span class="step-num">9</span><span class="step-label">QC Verify</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="10"><span class="step-num">10</span><span class="step-label">Transfer</span></div>
           </div>
 
           <div class="wizard-body">
@@ -441,18 +443,77 @@
               </div>
             </div>
 
-            <!-- Step 5: Preview -->
+            <!-- Step 5: Pre-Collection Search -->
             <div class="wizard-content" id="wiz-step-5">
-              <h2>Step 5: Collection Preview</h2>
+              <h2>Step 5: Pre-Collection Search</h2>
+              <p class="wizard-desc">Search the mail server before collecting. Find and select only the messages you need &mdash; skip everything else.</p>
+              <div class="wizard-form">
+                <div class="wiz-section">
+                  <div class="wiz-optional-badge">Optional</div>
+                  <h3 class="wiz-section-title">Server-Side Search</h3>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label>From</label>
+                      <input type="text" id="wiz-search-from" placeholder="sender@example.com">
+                    </div>
+                    <div class="form-group">
+                      <label>To</label>
+                      <input type="text" id="wiz-search-to" placeholder="recipient@example.com">
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label>Subject</label>
+                      <input type="text" id="wiz-search-subject" placeholder="e.g. invoice, contract">
+                    </div>
+                    <div class="form-group">
+                      <label>Body Keywords</label>
+                      <input type="text" id="wiz-search-body" placeholder="e.g. confidential, payment">
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label>Date From</label>
+                      <input type="date" id="wiz-search-date-from">
+                    </div>
+                    <div class="form-group">
+                      <label>Date To</label>
+                      <input type="date" id="wiz-search-date-to">
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px">
+                    <label class="toggle-label"><input type="checkbox" id="wiz-search-unread"> Unread Only</label>
+                    <label class="toggle-label"><input type="checkbox" id="wiz-search-flagged"> Flagged Only</label>
+                  </div>
+                  <div style="display:flex;gap:12px;align-items:center">
+                    <button type="button" class="btn btn-primary" onclick="wizRunSearch()">Search Server</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="wizClearSearch()">Clear Search</button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="wizSkipSearch()">Skip &mdash; Collect All</button>
+                    <span id="wiz-search-status"></span>
+                  </div>
+                </div>
+
+                <div id="wiz-search-results" style="margin-top:20px">
+                  <div class="empty-state" style="height:150px">
+                    <p>Enter search criteria and click "Search Server" to find messages before collection.<br>
+                    Or click "Skip" to collect all messages from selected folders.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 6: Preview -->
+            <div class="wizard-content" id="wiz-step-6">
+              <h2>Step 6: Collection Preview</h2>
               <p class="wizard-desc">Review your collection settings before starting. The tool will estimate total items to be collected.</p>
               <div id="wiz-preview-content" class="wizard-form">
                 <div class="wiz-preview-grid" id="wiz-preview-summary"></div>
               </div>
             </div>
 
-            <!-- Step 6: Collecting -->
-            <div class="wizard-content" id="wiz-step-6">
-              <h2>Step 6: Collection in Progress</h2>
+            <!-- Step 7: Collecting -->
+            <div class="wizard-content" id="wiz-step-7">
+              <h2>Step 7: Collection in Progress</h2>
               <p class="wizard-desc">The tool is now collecting emails from the server. Do not close this window.</p>
               <div class="wizard-form">
                 <div class="wiz-progress-section">
@@ -466,9 +527,9 @@
               </div>
             </div>
 
-            <!-- Step 7: Results -->
-            <div class="wizard-content" id="wiz-step-7">
-              <h2>Step 7: Collection Results</h2>
+            <!-- Step 8: Results -->
+            <div class="wizard-content" id="wiz-step-8">
+              <h2>Step 8: Collection Results</h2>
               <p class="wizard-desc">Collection finished. Review the results and any errors below.</p>
               <div class="wizard-form">
                 <div id="wiz-results-content"></div>
@@ -477,9 +538,9 @@
               </div>
             </div>
 
-            <!-- Step 8: QC Verify -->
-            <div class="wizard-content" id="wiz-step-8">
-              <h2>Step 8: QC Verification</h2>
+            <!-- Step 9: QC Verify -->
+            <div class="wizard-content" id="wiz-step-9">
+              <h2>Step 9: QC Verification</h2>
               <p class="wizard-desc">Verify collection integrity by reconnecting to the mail server and comparing message counts and hashes.</p>
               <div class="wizard-form">
                 <div style="display:flex;gap:16px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
@@ -497,9 +558,9 @@
               </div>
             </div>
 
-            <!-- Step 9: Transfer -->
-            <div class="wizard-content" id="wiz-step-9">
-              <h2>Step 9: Transfer Collection</h2>
+            <!-- Step 10: Transfer -->
+            <div class="wizard-content" id="wiz-step-10">
+              <h2>Step 10: Transfer Collection</h2>
               <p class="wizard-desc">Copy the collected data to a different location, such as a network drive or external storage.</p>
               <div class="wizard-form">
                 <div class="form-group">
@@ -523,7 +584,7 @@
           <!-- Wizard Navigation -->
           <div class="wizard-nav">
             <button class="btn btn-secondary" id="wiz-btn-back" onclick="wizBack()" style="visibility:hidden">Back</button>
-            <div class="wizard-step-indicator" id="wiz-step-indicator">Step 1 of 9</div>
+            <div class="wizard-step-indicator" id="wiz-step-indicator">Step 1 of 10</div>
             <button class="btn btn-primary" id="wiz-btn-next" onclick="wizNext()">Next</button>
           </div>
         </div>
