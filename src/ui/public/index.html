@@ -24,7 +24,7 @@
         <div class="nav-tab active" data-tab="projects" onclick="switchTab('projects')">Projects</div>
         <div class="nav-tab" data-tab="audit" onclick="switchTab('audit')">Chain of Custody</div>
         <div class="nav-tab" data-tab="collect" onclick="switchTab('collect')">Collect</div>
-        <div class="nav-tab" data-tab="messages" onclick="switchTab('messages')">Messages</div>
+        <div class="nav-tab" data-tab="messages" onclick="switchTab('messages')">Review</div>
         <div class="nav-tab" data-tab="search" onclick="switchTab('search')">Search</div>
         <div class="nav-tab" data-tab="guide" onclick="switchTab('guide')">Guide</div>
       </div>
@@ -122,7 +122,9 @@
 
         <!-- Search Panel -->
         <div id="view-search" class="panel-view">
-          <h2>Forensic Search</h2>
+          <h2 style="display:flex;align-items:center;gap:8px">Forensic Search
+            <span title="Search through collected emails in a project" style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--text-muted);font-size:12px;color:var(--text-muted);font-weight:600">i</span>
+          </h2>
           <div class="form-group">
             <label>Search Query (Inline Search Syntax)</label>
             <div style="display:flex;gap:8px;max-width:700px">
