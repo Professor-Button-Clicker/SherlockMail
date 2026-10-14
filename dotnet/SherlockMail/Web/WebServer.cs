@@ -460,16 +460,6 @@ public static class WebServer
         Console.WriteLine($"  Runtime:    .NET {Environment.Version}");
         Console.WriteLine();
 
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = $"http://localhost:{port}",
-                UseShellExecute = true
-            });
-        }
-        catch { }
-
         await app.RunAsync(ct);
     }
 
