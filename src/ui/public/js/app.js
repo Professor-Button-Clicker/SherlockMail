@@ -68,7 +68,7 @@ function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
 
-  const views = ['messages', 'new-project', 'search', 'audit', 'stats', 'collect', 'guide'];
+  const views = ['messages', 'new-project', 'search', 'audit', 'stats', 'collect', 'qc', 'guide'];
   views.forEach(v => {
     const el = document.getElementById(`view-${v}`);
     if (el) {
@@ -83,6 +83,18 @@ function switchTab(tab) {
   if (tab === 'projects' || tab === 'messages') {
     document.getElementById('view-messages').style.display = 'flex';
     document.querySelectorAll('.panel-view').forEach(p => p.classList.remove('visible'));
+  }
+
+  if (tab === 'qc') qcLoadAll();
+
+  const sidebarProjects = document.getElementById('sidebar-projects');
+  const sidebarGuide = document.getElementById('sidebar-guide');
+  if (tab === 'guide') {
+    sidebarProjects.style.display = 'none';
+    sidebarGuide.style.display = '';
+  } else {
+    sidebarProjects.style.display = '';
+    sidebarGuide.style.display = 'none';
   }
 
   if (tab === 'audit' && currentProject) loadAuditLog();
@@ -140,7 +152,7 @@ async function selectProject(id) {
   currentFolder = null;
   loadProjects();
 
-  switchTab('messages');
+  switchTab('collect');
   loadFolders();
   loadMessages();
 
@@ -208,7 +220,7 @@ async function loadMessages() {
   const messages = await api(`/projects/${currentProject.id}/messages?${params}`);
 
   const list = document.getElementById('message-list');
-  document.getElementById('message-count').textContent = `${messages.length} messages`;
+  document.getElementById('message-count').textContent = `${messages.length} data items`;
 
   if (messages.length === 0) {
     list.innerHTML = `
@@ -217,7 +229,7 @@ async function loadMessages() {
           <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
           <polyline points="22,6 12,13 2,6"/>
         </svg>
-        <h3>${currentFolder ? 'No messages in this folder' : 'No messages acquired yet'}</h3>
+        <h3>${currentFolder ? 'No data in this folder' : 'No data acquired yet'}</h3>
         <p>Use the <strong>Collect</strong> tab to run the collection wizard, or run via CLI.</p>
       </div>`;
     return;
@@ -1101,10 +1113,228 @@ function wizResetState() {
   document.getElementById('wiz-progress-fill').classList.remove('complete');
 }
 
+// --- QC Tab ---
+async function qcLoadAll() {
+  if (!currentProject) {
+    document.getElementById('qc-no-project').style.display = '';
+    document.getElementById('qc-content').style.display = 'none';
+    return;
+  }
+  document.getElementById('qc-no-project').style.display = 'none';
+  document.getElementById('qc-content').style.display = '';
+
+  try {
+    const [stats, acquisitions, qcResults] = await Promise.all([
+      api(`/projects/${currentProject.id}/stats`).catch(() => null),
+      api(`/projects/${currentProject.id}/acquisitions`).catch(() => []),
+      api(`/projects/${currentProject.id}/qc`).catch(() => null)
+    ]);
+
+    let driveStats = null;
+    try { driveStats = await api(`/projects/${currentProject.id}/drive-link-stats`); } catch {}
+
+    qcRenderSummaryCards(stats, driveStats);
+    qcRenderAcquisitionLog(acquisitions);
+    qcRenderCollectionLog(acquisitions);
+    qcRenderErrorLog(acquisitions);
+    qcRenderCustodyLog(acquisitions);
+
+    if (qcResults?.summary) {
+      qcRenderVerificationResults(qcResults);
+    } else {
+      document.getElementById('qc-verification-results').innerHTML =
+        '<p style="color:var(--text-muted);font-size:13px">No QC verification has been run yet. Click "Run QC Verification" to verify collection integrity.</p>';
+    }
+  } catch (err) {
+    document.getElementById('qc-summary-cards').innerHTML =
+      `<div style="color:var(--danger);padding:12px">Failed to load QC data: ${esc(err.message)}</div>`;
+  }
+}
+
+function qcRenderSummaryCards(stats, driveStats) {
+  const el = document.getElementById('qc-summary-cards');
+  const s = stats || {};
+  const msgCount = s.messages?.count || 0;
+  const folderCount = s.folders?.count || 0;
+  const totalSize = s.messages?.totalSize || 0;
+  const driveCount = driveStats?.totalLinks || 0;
+  const oneDriveCount = driveStats?.byService?.onedrive || 0;
+  const gDriveCount = driveStats?.byService?.gdrive || 0;
+
+  el.innerHTML = `
+    <div class="stat-card"><div class="stat-label">Total Collected</div><div class="stat-value">${msgCount.toLocaleString()}</div><div style="font-size:11px;color:var(--text-muted)">data items</div></div>
+    <div class="stat-card"><div class="stat-label">Folders</div><div class="stat-value">${folderCount}</div></div>
+    <div class="stat-card"><div class="stat-label">Total Size</div><div class="stat-value" style="font-size:18px">${formatBytes(totalSize)}</div></div>
+    <div class="stat-card"><div class="stat-label">Drive Links</div><div class="stat-value">${driveCount}</div><div style="font-size:11px;color:var(--text-muted)">Google: ${gDriveCount} | OneDrive: ${oneDriveCount}</div></div>
+  `;
+}
+
+function qcRenderVerificationResults(results) {
+  const el = document.getElementById('qc-verification-results');
+  const s = results.summary;
+  const verdictClass = s.overallVerdict === 'PASS' ? 'verify-pass' : 'verify-fail';
+
+  let html = `
+    <div style="padding:16px;background:var(--bg-secondary);border-radius:8px;margin-bottom:16px">
+      <h3 style="margin-bottom:8px">
+        Last QC Result: <span class="${verdictClass}">${s.overallVerdict === 'PASS' ? 'PASS' : 'ISSUES FOUND'}</span>
+      </h3>
+      <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">${esc(s.verdictNote || '')}</p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">
+        <div><span style="color:var(--text-muted);font-size:12px">Folders Checked</span><br><strong>${s.totalFoldersChecked}</strong></div>
+        <div><span style="color:var(--text-muted);font-size:12px">Messages Checked</span><br><strong>${s.totalMessagesChecked}</strong></div>
+        <div><span style="color:var(--text-muted);font-size:12px">Hash Matches</span><br><strong style="color:var(--success)">${s.hashMatches}</strong></div>
+        <div><span style="color:var(--text-muted);font-size:12px">Hash Mismatches</span><br><strong style="color:${s.hashMismatches > 0 ? 'var(--danger)' : 'var(--success)'}">${s.hashMismatches}</strong></div>
+      </div>
+    </div>`;
+
+  if (results.folderResults?.length) {
+    html += `<table class="audit-table"><thead><tr>
+      <th>Folder</th><th>Status</th><th>Server</th><th>Collected</th><th>Diff</th>
+    </tr></thead><tbody>`;
+    for (const f of results.folderResults) {
+      const statusColor = f.status === 'COUNT_MATCH' ? 'var(--success)' : 'var(--warning)';
+      html += `<tr>
+        <td>${esc(f.folder)}</td>
+        <td><span style="color:${statusColor};font-weight:600">${f.status}</span></td>
+        <td>${f.serverMessageCount ?? 'N/A'}</td>
+        <td>${f.dbMessageCount ?? 'N/A'}</td>
+        <td>${f.difference != null ? (f.difference > 0 ? '+' : '') + f.difference : 'N/A'}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  el.innerHTML = html;
+}
+
+function qcRenderAcquisitionLog(acquisitions) {
+  const el = document.getElementById('qc-log-acquisition');
+  if (!acquisitions?.length) {
+    el.innerHTML = '<span style="color:var(--text-muted)">No acquisitions recorded.</span>';
+    return;
+  }
+  el.innerHTML = acquisitions.map(a => {
+    const status = a.status === 'completed' ? `<span style="color:var(--success)">COMPLETED</span>` : `<span style="color:var(--warning)">${(a.status || 'unknown').toUpperCase()}</span>`;
+    const started = a.started_at ? new Date(a.started_at).toLocaleString() : 'N/A';
+    const ended = a.completed_at ? new Date(a.completed_at).toLocaleString() : 'in progress';
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div>Acquisition <strong>${esc(a.id?.slice(0, 8) || '?')}</strong> | ${status}</div>
+      <div style="color:var(--text-muted)">Started: ${started} | Ended: ${ended}</div>
+      <div style="color:var(--text-muted)">Messages: ${a.messages_acquired || 0} acquired, ${a.messages_failed || 0} failed, ${a.messages_skipped || 0} skipped</div>
+    </div>`;
+  }).join('');
+}
+
+function qcRenderCollectionLog(acquisitions) {
+  const el = document.getElementById('qc-log-collection');
+  if (!acquisitions?.length) {
+    el.innerHTML = '<span style="color:var(--text-muted)">No collection logs available.</span>';
+    return;
+  }
+  const completed = acquisitions.filter(a => a.status === 'completed');
+  const total = acquisitions.length;
+  el.innerHTML = `
+    <div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <strong>${completed.length}</strong> of <strong>${total}</strong> acquisition(s) completed successfully.
+    </div>
+    ${acquisitions.map(a => {
+      const bytes = a.total_bytes || 0;
+      return `<div style="padding:4px 0;color:var(--text-muted)">
+        ${esc(a.id?.slice(0, 8) || '?')}: ${a.messages_acquired || 0} items | ${formatBytes(bytes)} | folders: ${a.folders_processed || 'N/A'}
+      </div>`;
+    }).join('')}`;
+}
+
+function qcRenderErrorLog(acquisitions) {
+  const el = document.getElementById('qc-log-errors');
+  if (!acquisitions?.length) {
+    el.innerHTML = '<span style="color:var(--text-muted)">No errors recorded.</span>';
+    return;
+  }
+  const withErrors = acquisitions.filter(a => (a.messages_failed || 0) > 0 || a.error);
+  if (!withErrors.length) {
+    el.innerHTML = '<span style="color:var(--success)">No errors across all acquisitions.</span>';
+    return;
+  }
+  el.innerHTML = withErrors.map(a => {
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border);color:var(--danger)">
+      Acquisition ${esc(a.id?.slice(0, 8) || '?')}: ${a.messages_failed || 0} failed message(s)${a.error ? ' | ' + esc(a.error) : ''}
+    </div>`;
+  }).join('');
+}
+
+function qcRenderCustodyLog(acquisitions) {
+  const el = document.getElementById('qc-log-custody');
+  if (!acquisitions?.length) {
+    el.innerHTML = '<span style="color:var(--text-muted)">No chain of custody events recorded.</span>';
+    return;
+  }
+  el.innerHTML = acquisitions.map(a => {
+    const started = a.started_at ? new Date(a.started_at).toLocaleString() : 'N/A';
+    const ended = a.completed_at ? new Date(a.completed_at).toLocaleString() : 'N/A';
+    return `<div style="padding:6px 0;border-bottom:1px solid var(--border)">
+      <div><strong>Collection initiated</strong> — ${started}</div>
+      <div>Acquisition ID: <code style="font-size:11px">${esc(a.id || '?')}</code></div>
+      ${a.completed_at ? `<div><strong>Collection completed</strong> — ${ended}</div>` : '<div style="color:var(--warning)">In progress</div>'}
+      <div style="color:var(--text-muted)">Items collected: ${a.messages_acquired || 0} | Hash: ${a.hash_algorithm || 'SHA-256'}</div>
+    </div>`;
+  }).join('');
+}
+
+async function qcRunVerification() {
+  if (!currentProject) { toast('No project selected'); return; }
+  const statusEl = document.getElementById('qc-status');
+  statusEl.innerHTML = '<span style="color:var(--accent)">Running QC verification...</span>';
+
+  try {
+    const results = await api(`/projects/${currentProject.id}/qc`, { method: 'POST', body: {} });
+    statusEl.innerHTML = '<span style="color:var(--success)">QC verification complete.</span>';
+    if (results?.summary) qcRenderVerificationResults(results);
+    qcLoadAll();
+  } catch (err) {
+    statusEl.innerHTML = `<span style="color:var(--danger)">QC failed: ${esc(err.message || 'Unknown error')}</span>`;
+  }
+}
+
+function qcRefreshLogs() {
+  qcLoadAll();
+  toast('QC logs refreshed');
+}
+
 // --- Guide ---
 function guideScroll(id) {
   const el = document.getElementById(id);
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function guideNavTo(sectionId) {
+  document.querySelectorAll('.guide-nav-item').forEach(i => i.classList.remove('active'));
+  const item = document.querySelector(`.guide-nav-item[data-section="${sectionId}"]`);
+  if (item) item.classList.add('active');
+
+  guideScroll(sectionId);
+}
+
+function guideFilterSections(query) {
+  const q = query.toLowerCase().trim();
+  const navItems = document.querySelectorAll('.guide-nav-item');
+  const sections = document.querySelectorAll('.guide-section');
+
+  if (!q) {
+    navItems.forEach(i => i.classList.remove('hidden'));
+    sections.forEach(s => s.style.display = '');
+    return;
+  }
+
+  navItems.forEach(item => {
+    const sectionId = item.dataset.section;
+    const section = document.getElementById(sectionId);
+    const text = (item.textContent + ' ' + (section?.textContent || '')).toLowerCase();
+    const match = text.includes(q);
+    item.classList.toggle('hidden', !match);
+    if (section) section.style.display = match ? '' : 'none';
+  });
 }
 
 // --- Utilities ---

@@ -22,8 +22,9 @@
 
       <div class="nav-tabs">
         <div class="nav-tab active" data-tab="projects" onclick="switchTab('projects')">Projects</div>
-        <div class="nav-tab" data-tab="audit" onclick="switchTab('audit')">Chain of Custody</div>
+        <div class="nav-tab" data-tab="audit" onclick="switchTab('audit')">Tracker</div>
         <div class="nav-tab" data-tab="collect" onclick="switchTab('collect')">Collect</div>
+        <div class="nav-tab" data-tab="qc" onclick="switchTab('qc')">QC</div>
         <div class="nav-tab" data-tab="messages" onclick="switchTab('messages')">Review</div>
         <div class="nav-tab" data-tab="search" onclick="switchTab('search')">Search</div>
         <div class="nav-tab" data-tab="guide" onclick="switchTab('guide')">Guide</div>
@@ -34,7 +35,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
           </svg>
-          <input type="text" id="global-search" placeholder="Search messages..." onkeydown="if(event.key==='Enter') globalSearch()">
+          <input type="text" id="global-search" placeholder="Search data..." onkeydown="if(event.key==='Enter') globalSearch()">
           <select id="search-type">
             <option value="basic">Basic</option>
             <option value="inline">Inline</option>
@@ -47,11 +48,38 @@
     <div class="main-content">
       <!-- Sidebar -->
       <div class="sidebar">
-        <div class="sidebar-header">
-          <h3 id="sidebar-title">Projects</h3>
-          <button class="btn btn-sm btn-primary" onclick="switchTab('new-project')">+</button>
+        <!-- Projects Sidebar (default) -->
+        <div id="sidebar-projects">
+          <div class="sidebar-header">
+            <h3 id="sidebar-title">Projects</h3>
+            <button class="btn btn-sm btn-primary" onclick="switchTab('new-project')">+</button>
+          </div>
+          <div class="sidebar-content" id="sidebar-content"></div>
         </div>
-        <div class="sidebar-content" id="sidebar-content"></div>
+
+        <!-- Guide Sidebar (shown when Guide tab active) -->
+        <div id="sidebar-guide" style="display:none">
+          <div class="sidebar-header">
+            <h3>Guide</h3>
+          </div>
+          <div style="padding:8px 12px">
+            <input type="text" id="guide-search-input" placeholder="Search guides..." oninput="guideFilterSections(this.value)">
+          </div>
+          <div id="guide-nav-list" style="padding:4px 0;overflow-y:auto;flex:1">
+            <div class="guide-nav-item" data-section="guide-overview" onclick="guideNavTo('guide-overview')">Overview</div>
+            <div class="guide-nav-item" data-section="guide-getting-started" onclick="guideNavTo('guide-getting-started')">Getting Started</div>
+            <div class="guide-nav-item" data-section="guide-projects" onclick="guideNavTo('guide-projects')">Creating a Project</div>
+            <div class="guide-nav-item" data-section="guide-collection" onclick="guideNavTo('guide-collection')">Running a Collection</div>
+            <div class="guide-nav-item" data-section="guide-formats" onclick="guideNavTo('guide-formats')">Export Formats</div>
+            <div class="guide-nav-item" data-section="guide-qc" onclick="guideNavTo('guide-qc')">QC Verification</div>
+            <div class="guide-nav-item" data-section="guide-drive" onclick="guideNavTo('guide-drive')">Drive Link Attachments</div>
+            <div class="guide-nav-item" data-section="guide-search" onclick="guideNavTo('guide-search')">Searching Messages</div>
+            <div class="guide-nav-item" data-section="guide-custody" onclick="guideNavTo('guide-custody')">Chain of Custody</div>
+            <div class="guide-nav-item" data-section="guide-cli" onclick="guideNavTo('guide-cli')">CLI Reference</div>
+            <div class="guide-nav-item" data-section="guide-security" onclick="guideNavTo('guide-security')">Security & Forensic Integrity</div>
+          </div>
+        </div>
+
         <div class="sidebar-footer">
           <span class="version">v1.0.0</span>
           <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" id="theme-btn">
@@ -71,7 +99,7 @@
         <!-- Messages View -->
         <div id="view-messages" class="message-list-panel">
           <div class="message-list-header">
-            <span id="message-list-title">Select a project to view messages</span>
+            <span id="message-list-title">Select a project to view data</span>
             <span class="msg-count" id="message-count"></span>
           </div>
           <div class="message-list" id="message-list">
@@ -80,7 +108,7 @@
                 <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
                 <polyline points="22,6 12,13 2,6"/>
               </svg>
-              <h3>No messages loaded</h3>
+              <h3>No data loaded</h3>
               <p>Create a new project or select an existing one to begin forensic email acquisition and analysis.</p>
             </div>
           </div>
@@ -144,7 +172,7 @@
 
         <!-- Audit Log Panel -->
         <div id="view-audit" class="panel-view">
-          <h2>Chain of Custody Log</h2>
+          <h2>Tracker</h2>
           <div style="margin-bottom:20px;display:flex;gap:12px;align-items:center">
             <button class="btn btn-success btn-sm" onclick="verifyChain()">Verify Chain Integrity</button>
             <span id="chain-status"></span>
@@ -560,6 +588,56 @@
           </div>
         </div>
 
+        <!-- ========== QC TAB ========== -->
+        <div id="view-qc" class="panel-view">
+          <h2 style="display:flex;align-items:center;gap:8px">QC Verification
+            <span title="Verify collection results and review all logs" style="cursor:help;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:50%;border:1.5px solid var(--text-muted);font-size:12px;color:var(--text-muted);font-weight:600">i</span>
+          </h2>
+          <p class="wizard-desc">Verify collection integrity, review acquisition logs, and inspect error reports.</p>
+
+          <div id="qc-no-project" style="color:var(--text-muted);padding:20px">
+            <p>Select a project to view QC results.</p>
+          </div>
+
+          <div id="qc-content" style="display:none">
+            <!-- Summary Cards -->
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px" id="qc-summary-cards"></div>
+
+            <!-- Action Buttons -->
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:24px;flex-wrap:wrap">
+              <button class="btn btn-primary" onclick="qcRunVerification()">Run QC Verification</button>
+              <button class="btn btn-secondary btn-sm" onclick="qcRefreshLogs()">Refresh Logs</button>
+              <span id="qc-status"></span>
+            </div>
+
+            <!-- QC Verification Results -->
+            <div id="qc-verification-results" style="margin-bottom:24px"></div>
+
+            <!-- Log Sections -->
+            <div class="qc-log-sections">
+              <details open>
+                <summary style="cursor:pointer;font-weight:600;font-size:14px;color:var(--text-primary);padding:8px 0">Acquisition Log</summary>
+                <div id="qc-log-acquisition" class="qc-log-box" style="max-height:300px;overflow-y:auto;background:var(--bg-secondary);border-radius:8px;padding:12px;margin-top:8px;font-size:12px;font-family:var(--font-mono)"></div>
+              </details>
+
+              <details>
+                <summary style="cursor:pointer;font-weight:600;font-size:14px;color:var(--text-primary);padding:8px 0">Collection Log</summary>
+                <div id="qc-log-collection" class="qc-log-box" style="max-height:300px;overflow-y:auto;background:var(--bg-secondary);border-radius:8px;padding:12px;margin-top:8px;font-size:12px;font-family:var(--font-mono)"></div>
+              </details>
+
+              <details>
+                <summary style="cursor:pointer;font-weight:600;font-size:14px;color:var(--danger);padding:8px 0">Error Log</summary>
+                <div id="qc-log-errors" class="qc-log-box" style="max-height:300px;overflow-y:auto;background:var(--bg-secondary);border-radius:8px;padding:12px;margin-top:8px;font-size:12px;font-family:var(--font-mono)"></div>
+              </details>
+
+              <details>
+                <summary style="cursor:pointer;font-weight:600;font-size:14px;color:var(--text-primary);padding:8px 0">Chain of Custody Events</summary>
+                <div id="qc-log-custody" class="qc-log-box" style="max-height:300px;overflow-y:auto;background:var(--bg-secondary);border-radius:8px;padding:12px;margin-top:8px;font-size:12px;font-family:var(--font-mono)"></div>
+              </details>
+            </div>
+          </div>
+        </div>
+
         <!-- ========== GUIDE TAB ========== -->
         <div id="view-guide" class="panel-view">
           <div class="guide-container">
@@ -612,7 +690,7 @@
               <ol class="guide-steps">
                 <li><strong>Create a Project</strong> &mdash; Click the "+ New" tab and fill in the case details, target email, and examiner information.</li>
                 <li><strong>Start a Collection</strong> &mdash; Go to the "Collect" tab to launch the step-by-step collection wizard.</li>
-                <li><strong>Review Results</strong> &mdash; Browse collected messages in the "Messages" tab, view chain of custody in the "Chain of Custody" tab.</li>
+                <li><strong>Review Results</strong> &mdash; Browse collected data in the "Review" tab, view chain of custody in the "Tracker" tab, verify results in the "QC" tab.</li>
                 <li><strong>Export &amp; Verify</strong> &mdash; Use the wizard's export and QC steps to produce court-ready output.</li>
               </ol>
               <div class="guide-callout">
