@@ -7,3 +7,10 @@ exports/
 dist/
 *.log
 .env
+
+# .NET
+dotnet/**/bin/
+dotnet/**/obj/
+dotnet/publish/
+*.user
+*.suo
