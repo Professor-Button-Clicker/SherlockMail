@@ -5,13 +5,14 @@
   "type": "module",
   "main": "src/cli/index.js",
   "bin": {
-    "fmc": "src/cli/index.js"
+    "sherlock-mail": "src/cli/index.js"
   },
   "scripts": {
     "start": "node src/ui/server.js",
     "cli": "node src/cli/index.js",
     "acquire": "node src/cli/index.js acquire",
-    "dashboard": "node src/ui/server.js"
+    "dashboard": "node src/ui/server.js",
+    "build": "node build.js"
   },
   "engines": {
     "node": ">=18.0.0"
@@ -31,6 +32,10 @@
   "author": "SherlockMail",
   "license": "MIT",
   "allowScripts": {
-    "better-sqlite3@11.10.0": true
+    "esbuild@0.28.2": true
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "postject": "^1.0.0-alpha.6"
   }
 }

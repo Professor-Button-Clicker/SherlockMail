@@ -1,8 +1,18 @@
 import initSqlJs from 'sql.js';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 
 let SQL;
+
+function getSqlWasmPath() {
+  try {
+    const require = createRequire(import.meta.url);
+    return join(dirname(require.resolve('sql.js')), 'dist', 'sql-wasm.wasm');
+  } catch {
+    return undefined;
+  }
+}
 
 class PreparedStatement {
   constructor(db, sql, autoSave) {
@@ -49,7 +59,13 @@ export class ForensicDatabase {
 
   static async create(dbPath) {
     mkdirSync(join(dbPath, '..'), { recursive: true });
-    if (!SQL) SQL = await initSqlJs();
+    if (!SQL) {
+      const wasmPath = getSqlWasmPath();
+      const opts = wasmPath && existsSync(wasmPath)
+        ? { locateFile: () => wasmPath }
+        : {};
+      SQL = await initSqlJs(opts);
+    }
     let sqlDb;
     if (existsSync(dbPath)) {
       const buffer = readFileSync(dbPath);

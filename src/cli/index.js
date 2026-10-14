@@ -16,7 +16,9 @@ import { ForensicExporter } from '../core/exporter.js';
 import { DriveAttachmentDetector } from '../core/drive-attachments.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DB_PATH = join(__dirname, '..', '..', 'data', 'fmc.sqlite');
+const isBundled = (() => { try { return require('node:sea').isSea(); } catch { return false; } })();
+const exeDir = isBundled ? dirname(process.execPath) : join(__dirname, '..', '..');
+const DB_PATH = join(exeDir, 'data', 'fmc.sqlite');
 
 const program = new Command();
 

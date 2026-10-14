@@ -17,13 +17,15 @@ import { v4 as uuid } from 'uuid';
 const activeCollections = new Map();
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const isBundled = (() => { try { return require('node:sea').isSea(); } catch { return false; } })();
+const exeDir = isBundled ? dirname(process.execPath) : join(__dirname, '..', '..');
 const PORT = process.env.FMC_PORT || 3847;
 
 const app = express();
 app.use(express.json());
 app.use(express.static(join(__dirname, 'public')));
 
-const dbPath = join(__dirname, '..', '..', 'data', 'fmc.sqlite');
+const dbPath = join(exeDir, 'data', 'fmc.sqlite');
 
 async function start() {
   const db = await ForensicDatabase.create(dbPath);
@@ -191,7 +193,7 @@ async function start() {
     const { format, outputDir, pstSizeGB, containerType } = req.body;
     if (!format) return res.status(400).json({ error: 'Export format is required' });
 
-    const outDir = outputDir || join(__dirname, '..', '..', 'exports', req.params.id, format);
+    const outDir = outputDir || join(exeDir, 'exports', req.params.id, format);
 
     try {
       const exporter = new ForensicExporter(db, req.params.id);
@@ -230,7 +232,7 @@ async function start() {
   });
 
   app.post('/api/projects/:id/drive-packages', async (req, res) => {
-    const outDir = req.body.outputDir || join(__dirname, '..', '..', 'exports', req.params.id, 'drive_packages');
+    const outDir = req.body.outputDir || join(exeDir, 'exports', req.params.id, 'drive_packages');
     try {
       const detector = new DriveAttachmentDetector(db, req.params.id);
       const result = await detector.createDrivePackages(outDir);
@@ -241,7 +243,7 @@ async function start() {
   });
 
   app.post('/api/projects/:id/staged-output', async (req, res) => {
-    const outDir = req.body.outputDir || join(__dirname, '..', '..', 'exports', req.params.id, 'staged');
+    const outDir = req.body.outputDir || join(exeDir, 'exports', req.params.id, 'staged');
     try {
       const detector = new DriveAttachmentDetector(db, req.params.id);
       const result = await detector.createStagedOutput(outDir);
@@ -317,7 +319,7 @@ async function start() {
       appPassword: connection.appPassword,
       folders: selectedFolders || [],
       query: query || null,
-      outputDir: outputDir || join(__dirname, '..', '..', 'output', projectId),
+      outputDir: outputDir || join(exeDir, 'output', projectId),
       collectDriveLinks: collectDriveLinks !== false,
       collectModernAttachments: collectModernAttachments !== false,
       examinerName: project.examiner_name || 'Unknown'

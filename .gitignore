@@ -4,5 +4,6 @@ data/*.sqlite-wal
 data/*.sqlite-shm
 output/
 exports/
+dist/
 *.log
 .env
