@@ -8,24 +8,31 @@ Built for court-admissible evidence collection following NIST SP 800-86, ISO/IEC
 
 ## Quick Start
 
-### Standalone Executable (Windows)
+### Download (Recommended)
 
 Download the latest release from [Releases](https://github.com/Professor-Button-Clicker/SherlockMail/releases):
 
-1. Download and extract `SherlockMail-v1.0.0-win-x64.zip`
-2. Run `SherlockMail.exe` to launch the dashboard at `http://localhost:3847`
-3. No Node.js installation required
+1. Download and extract `SherlockMail-v2.0.0-win-x64.zip`
+2. Run `SherlockMail.exe` to launch the dashboard at `http://localhost:3858`
+3. No .NET runtime or installation required — fully self-contained
 
-### From Source
+### Build from Source
+
+Requires [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0).
 
 ```bash
 git clone https://github.com/Professor-Button-Clicker/SherlockMail.git
-cd SherlockMail
-npm install
-npm start
+cd SherlockMail/dotnet
+dotnet run --project SherlockMail
 ```
 
-The dashboard opens at `http://localhost:3847`.
+The dashboard opens at `http://localhost:3858`.
+
+#### Publish Self-Contained Executable
+
+```bash
+dotnet publish SherlockMail/SherlockMail.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o ./publish
+```
 
 ---
 
@@ -110,8 +117,8 @@ SherlockMail.exe <command> [options]
 | `export` | Export collected data |
 | `detect` | Detect email provider from address |
 | `drive-scan` | Scan collected emails for drive links |
-| `drive-package` | Create drive link packages |
-| `stage` | Create staged output for delivery |
+| `audit` | View chain of custody audit log |
+| `providers` | List supported email providers |
 
 ### Examples
 
@@ -155,25 +162,17 @@ Available fields: `from`, `to`, `cc`, `bcc`, `subject`, `messageid`, `sent`, `at
 
 ---
 
-## Building from Source
+## Technology Stack
 
-### Prerequisites
-- Node.js 18+
-- npm
-
-### Build Executable
-
-```bash
-npm install
-npm run build
-```
-
-Output in `dist/`:
-- `SherlockMail.exe` — standalone executable
-- `public/` — dashboard UI assets
-- `sql-wasm.wasm` — SQLite database engine
-
-Distribute the entire `dist/` folder.
+| Component | Library |
+|-----------|---------|
+| Runtime | .NET 8 (C#) |
+| IMAP | MailKit / MimeKit |
+| Database | Microsoft.Data.Sqlite (WAL mode) |
+| Web Server | ASP.NET Minimal API (Kestrel) |
+| CLI | System.CommandLine |
+| Hashing | System.Security.Cryptography |
+| Licensing | X509Certificate2 (optional) |
 
 ---
 
@@ -181,30 +180,34 @@ Distribute the entire `dist/` folder.
 
 ```
 SherlockMail/
-├── src/
-│   ├── core/
-│   │   ├── acquisition-engine.js   # IMAP email acquisition
-│   │   ├── chain-of-custody.js     # Hash-chained audit trail
-│   │   ├── database.js             # SQLite forensic database
-│   │   ├── drive-attachments.js    # Cloud drive link detection
-│   │   ├── exporter.js             # Multi-format export
-│   │   ├── hasher.js               # MD5/SHA-256 hashing
-│   │   └── qc-verifier.js          # QC verification engine
-│   ├── protocols/
-│   │   └── imap-client.js          # Forensic IMAP client
-│   ├── auth/
-│   │   └── provider-detect.js      # Email provider detection
-│   ├── search/
-│   │   └── inline-search.js        # Lucene-style search engine
-│   ├── cli/
-│   │   └── index.js                # CLI interface
-│   └── ui/
-│       ├── server.js               # Express dashboard server
-│       └── public/                 # Dashboard frontend
-├── build.js                        # Node SEA build script
-├── sea-entry.js                    # Executable entry point
-├── sea-config.json                 # SEA configuration
-└── package.json
+├── dotnet/
+│   ├── SherlockMail.sln
+│   └── SherlockMail/
+│       ├── Program.cs                      # Entry point
+│       ├── SherlockMail.csproj             # .NET 8 project
+│       ├── Core/
+│       │   ├── AcquisitionEngine.cs        # IMAP email acquisition
+│       │   ├── ChainOfCustody.cs           # Hash-chained audit trail
+│       │   ├── ForensicDatabase.cs         # SQLite forensic database
+│       │   ├── DriveAttachmentDetector.cs  # Cloud drive link detection
+│       │   ├── ForensicExporter.cs         # Multi-format export
+│       │   ├── Hasher.cs                   # SHA-256/MD5 hashing
+│       │   └── QCVerifier.cs              # QC verification engine
+│       ├── Protocols/
+│       │   └── ForensicImapClient.cs       # Forensic IMAP client (MailKit)
+│       ├── Auth/
+│       │   └── ProviderDetect.cs           # Email provider detection
+│       ├── Search/
+│       │   └── InlineSearch.cs             # Lucene-style search engine
+│       ├── Cli/
+│       │   └── CliCommands.cs              # CLI interface
+│       ├── Web/
+│       │   └── WebServer.cs                # ASP.NET dashboard server
+│       ├── Licensing/
+│       │   └── CertificateLicensing.cs     # Certificate licensing (optional)
+│       └── wwwroot/                        # Dashboard frontend
+├── src/                                    # Original Node.js source (legacy)
+└── README.md
 ```
 
 ---
@@ -217,6 +220,7 @@ SherlockMail follows established digital forensics and incident response (DFIR) 
 - **ISO/IEC 27037** — Guidelines for identification, collection, acquisition and preservation of digital evidence
 - **ACPO/NPCC Principles** — Good practice guide for digital evidence
 - **FRE 901/902** — Federal Rules of Evidence for authentication and self-authentication
+- **FRE 702** — Expert testimony and scientific methodology
 - **Daubert Standard** — Scientific validity and reliability of forensic methods
 
 ### Integrity Guarantees
@@ -232,9 +236,15 @@ SherlockMail follows established digital forensics and incident response (DFIR) 
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `FMC_PORT` | `3847` | Dashboard server port |
+| `FMC_PORT` | `3858` | Dashboard server port |
 
-Data is stored in `data/fmc.sqlite` relative to the executable or project root.
+Data is stored in `data/fmc.sqlite` relative to the executable.
+
+### Licensing
+
+SherlockMail runs as **Community Edition** by default with all features enabled. No certificate is required.
+
+To activate Professional Edition, place a valid `license.pfx` certificate file next to the executable.
 
 ---
 
