@@ -19,7 +19,7 @@ const activeCollections = new Map();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const isBundled = (() => { try { return require('node:sea').isSea(); } catch { return false; } })();
 const exeDir = isBundled ? dirname(process.execPath) : join(__dirname, '..', '..');
-const PORT = process.env.FMC_PORT || 3847;
+const PORT = process.env.FMC_PORT || 3858;
 
 const app = express();
 app.use(express.json());
