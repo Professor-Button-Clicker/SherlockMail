@@ -584,7 +584,7 @@ function wizBindFormatListeners() {
   });
 }
 
-// --- Step 4: Load folders ---
+// --- Step 5: Load folders ---
 async function wizLoadFolders() {
   wizSaveConnection();
   const el = document.getElementById('wiz-folders-list');
@@ -627,12 +627,9 @@ function wizGetSelectedFolders() {
   return Array.from(cbs).map(cb => cb.dataset.path);
 }
 
-// --- Step 5: Pre-Collection Search ---
+// --- Step 4: Pre-Collection Search ---
 async function wizRunSearch() {
   wizSaveConnection();
-  wizSelectedFolders = wizGetSelectedFolders();
-
-  if (!wizSelectedFolders.length) { toast('Select folders first (Step 4)'); return; }
 
   const criteria = {};
   const sf = document.getElementById('wiz-search-from').value.trim();
@@ -657,13 +654,22 @@ async function wizRunSearch() {
 
   const statusEl = document.getElementById('wiz-search-status');
   const resultsEl = document.getElementById('wiz-search-results');
-  statusEl.innerHTML = '<span style="color:var(--accent)">Searching...</span>';
-  resultsEl.innerHTML = '<div style="padding:20px;color:var(--accent)">Searching across ' + wizSelectedFolders.length + ' folder(s)...</div>';
+  statusEl.innerHTML = '<span style="color:var(--accent)">Loading folders &amp; searching...</span>';
+  resultsEl.innerHTML = '<div style="padding:20px;color:var(--accent)">Connecting to server and searching all folders...</div>';
 
   try {
+    if (!wizFolders.length) {
+      const folders = await api('/list-remote-folders', { method: 'POST', body: wizConnection });
+      wizFolders = folders;
+    }
+    const allFolderPaths = wizFolders.filter(f => !f.flags?.includes('\\Noselect')).map(f => f.path);
+    if (!allFolderPaths.length) { toast('No searchable folders found on server'); return; }
+
+    statusEl.innerHTML = '<span style="color:var(--accent)">Searching ' + allFolderPaths.length + ' folder(s)...</span>';
+
     const data = await api('/search-remote', {
       method: 'POST',
-      body: { connection: wizConnection, folders: wizSelectedFolders, criteria }
+      body: { connection: wizConnection, folders: allFolderPaths, criteria }
     });
 
     wizSearchResults = data.results || [];
@@ -766,7 +772,7 @@ function wizApplySearchSelection() {
 
   wizSearchSelectedUids = uidsByFolder;
   toast(`${selected.length} message(s) selected for collection`);
-  wizGoToStep(6);
+  wizGoToStep(5);
 }
 
 function wizClearSearch() {
@@ -780,7 +786,7 @@ function wizClearSearch() {
   document.getElementById('wiz-search-flagged').checked = false;
   document.getElementById('wiz-search-status').innerHTML = '';
   document.getElementById('wiz-search-results').innerHTML =
-    '<div class="empty-state" style="height:150px"><p>Enter search criteria and click "Search Server" to find messages before collection.<br>Or click "Skip" to collect all messages from selected folders.</p></div>';
+    '<div class="empty-state" style="height:150px"><p>Enter search criteria and click "Search Server" to find messages before collection.<br>Or click "Skip" to collect all messages from all folders.</p></div>';
   wizSearchResults = [];
   wizSearchSelectedUids = null;
 }
@@ -789,7 +795,7 @@ function wizSkipSearch() {
   wizSearchSelectedUids = null;
   wizSearchResults = [];
   toast('Search skipped — all messages in selected folders will be collected');
-  wizGoToStep(6);
+  wizGoToStep(5);
 }
 
 // --- Step 6: Preview ---

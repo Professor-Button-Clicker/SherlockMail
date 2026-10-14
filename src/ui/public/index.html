@@ -193,9 +193,9 @@
             <div class="wizard-step-line"></div>
             <div class="wizard-step" data-step="3"><span class="step-num">3</span><span class="step-label">Query</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="4"><span class="step-num">4</span><span class="step-label">Folders</span></div>
+            <div class="wizard-step" data-step="4"><span class="step-num">4</span><span class="step-label">Search</span></div>
             <div class="wizard-step-line"></div>
-            <div class="wizard-step" data-step="5"><span class="step-num">5</span><span class="step-label">Search</span></div>
+            <div class="wizard-step" data-step="5"><span class="step-num">5</span><span class="step-label">Folders</span></div>
             <div class="wizard-step-line"></div>
             <div class="wizard-step" data-step="6"><span class="step-num">6</span><span class="step-label">Preview</span></div>
             <div class="wizard-step-line"></div>
@@ -425,27 +425,9 @@
               </div>
             </div>
 
-            <!-- Step 4: Folders -->
+            <!-- Step 4: Pre-Collection Search -->
             <div class="wizard-content" id="wiz-step-4">
-              <h2>Step 4: Select Folders</h2>
-              <p class="wizard-desc">Choose which mail folders or labels to include in the collection.</p>
-              <div class="wizard-form">
-                <div style="display:flex;gap:12px;margin-bottom:16px">
-                  <button class="btn btn-primary btn-sm" onclick="wizLoadFolders()">Load Folders from Server</button>
-                  <button class="btn btn-secondary btn-sm" onclick="wizSelectAllFolders()">Select All</button>
-                  <button class="btn btn-secondary btn-sm" onclick="wizDeselectAllFolders()">Deselect All</button>
-                </div>
-                <div id="wiz-folders-list" class="wiz-folders-list">
-                  <div class="empty-state" style="height:200px">
-                    <p>Click "Load Folders from Server" to fetch available mail folders.</p>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- Step 5: Pre-Collection Search -->
-            <div class="wizard-content" id="wiz-step-5">
-              <h2>Step 5: Pre-Collection Search</h2>
+              <h2>Step 4: Pre-Collection Search</h2>
               <p class="wizard-desc">Search the mail server before collecting. Find and select only the messages you need &mdash; skip everything else.</p>
               <div class="wizard-form">
                 <div class="wiz-section">
@@ -496,7 +478,25 @@
                 <div id="wiz-search-results" style="margin-top:20px">
                   <div class="empty-state" style="height:150px">
                     <p>Enter search criteria and click "Search Server" to find messages before collection.<br>
-                    Or click "Skip" to collect all messages from selected folders.</p>
+                    Or click "Skip" to collect all messages from all folders.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 5: Folders -->
+            <div class="wizard-content" id="wiz-step-5">
+              <h2>Step 5: Select Folders</h2>
+              <p class="wizard-desc">Choose which mail folders or labels to include in the collection.</p>
+              <div class="wizard-form">
+                <div style="display:flex;gap:12px;margin-bottom:16px">
+                  <button class="btn btn-primary btn-sm" onclick="wizLoadFolders()">Load Folders from Server</button>
+                  <button class="btn btn-secondary btn-sm" onclick="wizSelectAllFolders()">Select All</button>
+                  <button class="btn btn-secondary btn-sm" onclick="wizDeselectAllFolders()">Deselect All</button>
+                </div>
+                <div id="wiz-folders-list" class="wiz-folders-list">
+                  <div class="empty-state" style="height:200px">
+                    <p>Click "Load Folders from Server" to fetch available mail folders.</p>
                   </div>
                 </div>
               </div>
