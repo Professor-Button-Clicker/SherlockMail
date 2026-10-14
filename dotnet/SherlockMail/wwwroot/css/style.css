@@ -210,6 +210,7 @@ body {
 }
 
 .sidebar-footer {
+  margin-top: auto;
   padding: 10px 16px;
   border-top: 1px solid var(--border);
   display: flex;
@@ -217,6 +218,7 @@ body {
   justify-content: space-between;
   font-size: 11px;
   color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .sidebar-footer .version { font-family: var(--font-mono); font-size: 10px; }
@@ -1494,9 +1496,18 @@ input[type="range"]::-webkit-slider-thumb {
   display: none;
 }
 
+#sidebar-projects {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 #sidebar-guide {
   display: flex;
   flex-direction: column;
   flex: 1;
+  min-height: 0;
   overflow: hidden;
 }
