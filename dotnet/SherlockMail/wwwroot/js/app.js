@@ -500,7 +500,9 @@ function wizSaveConnection() {
     username: document.getElementById('wiz-username').value || undefined,
     tls: document.getElementById('wiz-tls').checked
   };
-  if (authMethod === 'app-password') {
+  if (authMethod === 'oauth2') {
+    wizConnection.useOAuth = true;
+  } else if (authMethod === 'app-password') {
     wizConnection.appPassword = password;
   } else {
     wizConnection.password = password;
@@ -510,12 +512,104 @@ function wizSaveConnection() {
 function wizUpdateAuthLabel() {
   const method = document.getElementById('wiz-auth-method').value;
   const label = document.getElementById('wiz-pass-label');
-  if (method === 'app-password') {
-    label.textContent = 'App-Specific Password';
-  } else if (method === 'oauth2') {
-    label.textContent = 'Access Token';
+  const passGroup = document.getElementById('wiz-pass-group');
+  const oauthGroup = document.getElementById('wiz-oauth-group');
+
+  if (method === 'oauth2') {
+    if (passGroup) passGroup.style.display = 'none';
+    if (oauthGroup) oauthGroup.style.display = 'block';
+    wizCheckOAuthStatus();
   } else {
-    label.textContent = 'Password';
+    if (passGroup) passGroup.style.display = 'block';
+    if (oauthGroup) oauthGroup.style.display = 'none';
+    if (method === 'app-password') {
+      label.textContent = 'App-Specific Password';
+    } else {
+      label.textContent = 'Password';
+    }
+  }
+}
+
+async function wizCheckOAuthStatus() {
+  const email = document.getElementById('wiz-email').value;
+  const el = document.getElementById('wiz-oauth-status');
+  if (!el) return;
+
+  try {
+    const status = await api(`/oauth/google/status?email=${encodeURIComponent(email)}`);
+    if (!status.configured) {
+      el.innerHTML = `<div style="color:var(--warning);margin-bottom:8px">OAuth not configured yet.</div>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="wizShowOAuthSetup()">Configure Google OAuth</button>`;
+    } else if (status.hasTokens) {
+      el.innerHTML = `<span class="verify-pass">Signed in as ${esc(status.email)}</span>
+        <button type="button" class="btn btn-secondary btn-sm" style="margin-left:8px" onclick="wizGoogleSignIn()">Re-authorize</button>
+        <button type="button" class="btn btn-secondary btn-sm" style="margin-left:4px" onclick="wizRevokeOAuth()">Revoke</button>`;
+    } else {
+      el.innerHTML = `<button type="button" class="btn btn-primary" onclick="wizGoogleSignIn()">Sign in with Google</button>`;
+    }
+  } catch {
+    el.innerHTML = '<span class="verify-fail">Could not check OAuth status</span>';
+  }
+}
+
+async function wizGoogleSignIn() {
+  const email = document.getElementById('wiz-email').value;
+  const el = document.getElementById('wiz-oauth-status');
+  if (!email) { toast('Enter an email address first'); return; }
+
+  try {
+    const result = await api('/oauth/google/start', { method: 'POST', body: { email } });
+    if (result.error) { toast(result.error); return; }
+    window.open(result.authUrl, '_blank', 'width=600,height=700');
+    el.innerHTML = '<span style="color:var(--accent)">Waiting for Google authorization... Complete sign-in in the popup window.</span>';
+
+    const pollInterval = setInterval(async () => {
+      const status = await api(`/oauth/google/status?email=${encodeURIComponent(email)}`);
+      if (status.hasTokens) {
+        clearInterval(pollInterval);
+        el.innerHTML = `<span class="verify-pass">Signed in as ${esc(status.email)}</span>
+          <button type="button" class="btn btn-secondary btn-sm" style="margin-left:8px" onclick="wizGoogleSignIn()">Re-authorize</button>`;
+        toast('Google authorization successful');
+      }
+    }, 2000);
+
+    setTimeout(() => clearInterval(pollInterval), 120000);
+  } catch (err) {
+    toast('OAuth error: ' + err.message);
+  }
+}
+
+async function wizRevokeOAuth() {
+  const email = document.getElementById('wiz-email').value;
+  if (!email) return;
+  await api('/oauth/google/revoke', { method: 'POST', body: { email } });
+  toast('OAuth tokens revoked');
+  wizCheckOAuthStatus();
+}
+
+function wizShowOAuthSetup() {
+  const el = document.getElementById('wiz-oauth-status');
+  el.innerHTML = `<div style="margin-bottom:12px;color:var(--text-secondary);font-size:12px">
+      Enter your Google Cloud OAuth credentials.<br>
+      <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color:var(--accent)">Get them from Google Cloud Console</a>
+    </div>
+    <div class="form-row" style="margin-bottom:8px">
+      <div class="form-group"><label>Client ID</label><input type="text" id="oauth-client-id" placeholder="xxxx.apps.googleusercontent.com"></div>
+      <div class="form-group"><label>Client Secret</label><input type="password" id="oauth-client-secret" placeholder="GOCSPX-..."></div>
+    </div>
+    <button type="button" class="btn btn-primary btn-sm" onclick="wizSaveOAuthConfig()">Save & Continue</button>`;
+}
+
+async function wizSaveOAuthConfig() {
+  const clientId = document.getElementById('oauth-client-id').value;
+  const clientSecret = document.getElementById('oauth-client-secret').value;
+  if (!clientId || !clientSecret) { toast('Both Client ID and Secret are required'); return; }
+  try {
+    await api('/oauth/google/configure', { method: 'POST', body: { clientId, clientSecret } });
+    toast('OAuth credentials saved');
+    wizCheckOAuthStatus();
+  } catch (err) {
+    toast('Error saving credentials: ' + err.message);
   }
 }
 
@@ -547,7 +641,10 @@ async function wizDetectProvider() {
   if (result.profile?.imap) {
     document.getElementById('wiz-host').value = result.profile.imap.host || '';
     document.getElementById('wiz-port').value = result.profile.imap.port || 993;
-    if (result.profile.requiresAppPassword) {
+    if (result.profile.supportsOAuth) {
+      document.getElementById('wiz-auth-method').value = 'oauth2';
+      wizUpdateAuthLabel();
+    } else if (result.profile.requiresAppPassword) {
       document.getElementById('wiz-auth-method').value = 'app-password';
       wizUpdateAuthLabel();
     }

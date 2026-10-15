@@ -13,10 +13,13 @@ namespace SherlockMail.Web;
 public static class WebServer
 {
     private static readonly ConcurrentDictionary<string, CollectionProgress> ActiveCollections = new();
+    private static GoogleOAuth? _oauth;
 
     public static async Task RunAsync(string dbPath, int port, string wwwrootPath, CancellationToken ct = default)
     {
         var db = ForensicDatabase.Create(dbPath);
+        var configDir = Path.Combine(Path.GetDirectoryName(dbPath)!, "..", "config");
+        _oauth = new GoogleOAuth(configDir, port);
 
         var builder = WebApplication.CreateBuilder();
         builder.WebHost.ConfigureKestrel(o => o.ListenAnyIP(port));
@@ -238,8 +241,17 @@ public static class WebServer
             var username = body.TryGetProperty("username", out var u) ? u.GetString() : email;
             var password = body.TryGetProperty("password", out var pw) ? pw.GetString() : null;
             var appPassword = body.TryGetProperty("appPassword", out var ap) ? ap.GetString() : null;
+            var useOAuth = body.TryGetProperty("useOAuth", out var oa) && oa.GetBoolean();
 
-            using var client = new ForensicImapClient(host, port, tls, email, username, password, appPassword);
+            string? accessToken = null;
+            if (useOAuth && _oauth != null)
+            {
+                accessToken = await _oauth.GetAccessTokenAsync(email);
+                if (accessToken == null)
+                    return Results.Json(new { success = false, message = "No OAuth tokens found. Please sign in with Google first." });
+            }
+
+            using var client = new ForensicImapClient(host, port, tls, email, username, password, appPassword, accessToken);
             try
             {
                 await client.ConnectAsync();
@@ -262,8 +274,13 @@ public static class WebServer
             var username = body.TryGetProperty("username", out var u) ? u.GetString() : email;
             var password = body.TryGetProperty("password", out var pw) ? pw.GetString() : null;
             var appPassword = body.TryGetProperty("appPassword", out var ap) ? ap.GetString() : null;
+            var useOAuth = body.TryGetProperty("useOAuth", out var oa) && oa.GetBoolean();
 
-            using var client = new ForensicImapClient(host, port, tls, email, username, password, appPassword);
+            string? accessToken = null;
+            if (useOAuth && _oauth != null)
+                accessToken = await _oauth.GetAccessTokenAsync(email);
+
+            using var client = new ForensicImapClient(host, port, tls, email, username, password, appPassword, accessToken);
             try
             {
                 await client.ConnectAsync();
@@ -288,6 +305,11 @@ public static class WebServer
             var username = conn.TryGetProperty("username", out var u) ? u.GetString() : email;
             var password = conn.TryGetProperty("password", out var pw) ? pw.GetString() : null;
             var appPassword = conn.TryGetProperty("appPassword", out var ap) ? ap.GetString() : null;
+            var useOAuth = conn.TryGetProperty("useOAuth", out var oa) && oa.GetBoolean();
+
+            string? accessToken = null;
+            if (useOAuth && _oauth != null)
+                accessToken = await _oauth.GetAccessTokenAsync(email);
 
             var foldersEl = body.GetProperty("folders");
             var folders = foldersEl.EnumerateArray().Select(f => f.GetString()!).ToList();
@@ -296,7 +318,7 @@ public static class WebServer
             foreach (var prop in criteriaEl.EnumerateObject())
                 criteria[prop.Name] = prop.Value.GetString();
 
-            using var client = new ForensicImapClient(host, port, tls, email, username, password, appPassword);
+            using var client = new ForensicImapClient(host, port, tls, email, username, password, appPassword, accessToken);
             try
             {
                 await client.ConnectAsync();
@@ -343,15 +365,22 @@ public static class WebServer
             var collectionId = Guid.NewGuid().ToString();
             var exeDir = AppContext.BaseDirectory;
 
+            var connEmail = conn.GetProperty("email").GetString()!;
+            var useOAuth = conn.TryGetProperty("useOAuth", out var oaVal) && oaVal.GetBoolean();
+            string? oauthToken = null;
+            if (useOAuth && _oauth != null)
+                oauthToken = await _oauth.GetAccessTokenAsync(connEmail);
+
             var config = new AcquisitionConfig
             {
                 Host = conn.GetProperty("host").GetString()!,
                 Port = conn.TryGetProperty("port", out var p) ? p.GetInt32() : 993,
                 Tls = !conn.TryGetProperty("tls", out var t) || t.GetBoolean(),
-                Email = conn.GetProperty("email").GetString()!,
+                Email = connEmail,
                 Username = conn.TryGetProperty("username", out var u) ? u.GetString() : null,
                 Password = conn.TryGetProperty("password", out var pw) ? pw.GetString() : null,
                 AppPassword = conn.TryGetProperty("appPassword", out var ap) ? ap.GetString() : null,
+                AccessToken = oauthToken,
                 OutputDir = body.TryGetProperty("outputDir", out var od) ? od.GetString()! : Path.Combine(exeDir, "output", projectId),
                 CollectDriveLinks = !body.TryGetProperty("collectDriveLinks", out var cdl) || cdl.GetBoolean(),
                 ExaminerName = project["examiner_name"]?.ToString() ?? "Unknown"
@@ -434,6 +463,103 @@ public static class WebServer
             catch (Exception ex) { return Results.Json(new { error = ex.Message }, statusCode: 500); }
         });
 
+        // --- Google OAuth ---
+        api.MapGet("/oauth/google/status", (string? email) =>
+        {
+            if (_oauth == null) return Results.Json(new { configured = false });
+            var result = new
+            {
+                configured = _oauth.IsConfigured,
+                hasTokens = !string.IsNullOrEmpty(email) && _oauth.HasTokens(email),
+                email = !string.IsNullOrEmpty(email) ? _oauth.GetTokenInfo(email)?.Email : null,
+                expiresAt = !string.IsNullOrEmpty(email) ? _oauth.GetTokenInfo(email)?.ExpiresAt.ToString("o") : null
+            };
+            return Results.Json(result);
+        });
+
+        api.MapPost("/oauth/google/configure", (JsonElement body) =>
+        {
+            if (_oauth == null) return Results.Json(new { error = "OAuth not initialized" }, statusCode: 500);
+            var clientId = body.GetProperty("clientId").GetString();
+            var clientSecret = body.GetProperty("clientSecret").GetString();
+            if (string.IsNullOrEmpty(clientId) || string.IsNullOrEmpty(clientSecret))
+                return Results.BadRequest(new { error = "Client ID and Secret are required" });
+            _oauth.SaveCredentials(clientId, clientSecret);
+            return Results.Json(new { success = true });
+        });
+
+        api.MapPost("/oauth/google/start", (JsonElement body) =>
+        {
+            if (_oauth == null) return Results.Json(new { error = "OAuth not initialized" }, statusCode: 500);
+            var email = body.TryGetProperty("email", out var e) ? e.GetString() ?? "" : "";
+            try
+            {
+                var (authUrl, state) = _oauth.StartAuthFlow(email);
+                return Results.Json(new { authUrl, state });
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 400);
+            }
+        });
+
+        app.MapGet("/api/oauth/google/callback", async (HttpContext ctx) =>
+        {
+            var code = ctx.Request.Query["code"].ToString();
+            var state = ctx.Request.Query["state"].ToString();
+            var error = ctx.Request.Query["error"].ToString();
+
+            if (!string.IsNullOrEmpty(error))
+            {
+                ctx.Response.ContentType = "text/html";
+                await ctx.Response.WriteAsync(OAuthResultPage("Authorization Denied",
+                    $"Google returned an error: {error}. You can close this tab.", false));
+                return;
+            }
+
+            try
+            {
+                var tokens = await _oauth!.HandleCallbackAsync(code, state);
+                ctx.Response.ContentType = "text/html";
+                await ctx.Response.WriteAsync(OAuthResultPage("Authorization Successful",
+                    $"Signed in as <strong>{tokens.Email}</strong>. You can close this tab and return to SherlockMail.", true));
+            }
+            catch (Exception ex)
+            {
+                ctx.Response.ContentType = "text/html";
+                await ctx.Response.WriteAsync(OAuthResultPage("Authorization Failed",
+                    $"Error: {ex.Message}", false));
+            }
+        });
+
+        api.MapPost("/oauth/google/token", async (JsonElement body) =>
+        {
+            if (_oauth == null) return Results.Json(new { error = "OAuth not initialized" }, statusCode: 500);
+            var email = body.GetProperty("email").GetString();
+            if (string.IsNullOrEmpty(email)) return Results.BadRequest(new { error = "Email required" });
+
+            try
+            {
+                var accessToken = await _oauth.GetAccessTokenAsync(email);
+                if (accessToken == null)
+                    return Results.Json(new { error = "No tokens found. Please sign in first." }, statusCode: 401);
+                return Results.Json(new { accessToken, email });
+            }
+            catch (Exception ex)
+            {
+                return Results.Json(new { error = ex.Message }, statusCode: 500);
+            }
+        });
+
+        api.MapPost("/oauth/google/revoke", (JsonElement body) =>
+        {
+            if (_oauth == null) return Results.Json(new { error = "OAuth not initialized" }, statusCode: 500);
+            var email = body.GetProperty("email").GetString();
+            if (string.IsNullOrEmpty(email)) return Results.BadRequest(new { error = "Email required" });
+            _oauth.RevokeTokens(email);
+            return Results.Json(new { success = true });
+        });
+
         // --- System ---
         api.MapGet("/system", () =>
         {
@@ -475,6 +601,19 @@ public static class WebServer
         if (string.IsNullOrEmpty(json)) return json;
         try { return JsonSerializer.Deserialize<object>(json); }
         catch { return json; }
+    }
+
+    private static string OAuthResultPage(string title, string message, bool success)
+    {
+        var color = success ? "#3ddfa0" : "#f06868";
+        var icon = success ? "&#10003;" : "&#10007;";
+        return $@"<!DOCTYPE html><html><head><title>{title}</title>
+<style>body{{font-family:'Inter',sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh;margin:0;background:#0F1B2D;color:#F0EBE3}}
+.card{{text-align:center;padding:48px;border-radius:12px;background:#142236;max-width:400px}}
+.icon{{font-size:48px;color:{color};margin-bottom:16px}}
+h1{{font-size:20px;margin-bottom:12px}}p{{color:#9AA8B8;line-height:1.6}}</style></head>
+<body><div class='card'><div class='icon'>{icon}</div><h1>{title}</h1><p>{message}</p></div>
+<script>setTimeout(()=>window.close(),5000)</script></body></html>";
     }
 
     private static void CopyDirectory(string source, string dest)
