@@ -1,16 +1,11 @@
 node_modules/
-data/*.sqlite
-data/*.sqlite-wal
-data/*.sqlite-shm
-output/
-exports/
+data/
 dist/
+release/
+projects/
 *.log
 .env
 
-# .NET
-dotnet/**/bin/
-dotnet/**/obj/
-dotnet/publish/
-*.user
-*.suo
+# Agent files stay local: never push them to this repo.
+.claude/
+agent-notes/

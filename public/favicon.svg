@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#1a2744"/>
+  <g transform="translate(48, 100)">
+    <!-- Envelope -->
+    <rect x="20" y="40" width="280" height="200" rx="20" fill="#e8ecf4" stroke="#e8ecf4" stroke-width="4"/>
+    <path d="M20 60 L160 160 L300 60" fill="none" stroke="#1a2744" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Magnifying glass -->
+    <circle cx="320" cy="200" r="72" fill="none" stroke="#d4881c" stroke-width="18"/>
+    <line x1="370" y1="252" x2="410" y2="292" stroke="#d4881c" stroke-width="18" stroke-linecap="round"/>
+  </g>
+</svg>

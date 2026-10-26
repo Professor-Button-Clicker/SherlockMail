@@ -1,0 +1,1445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SherlockMail</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="preload" href="/fonts/archivo-latin-wdth-normal.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Bar -->
+    <div class="top-bar">
+      <div class="logo">
+        <svg viewBox="0 0 34 28" fill="none" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="1" y="2" width="21" height="16" rx="3" fill="var(--logo-envelope)"/>
+          <path d="M2 4.5 L11.5 13 L21 4.5" stroke="var(--bg-base)" stroke-width="2" fill="none"/>
+          <circle cx="23.5" cy="18" r="7.5" fill="var(--bg-base)" stroke="var(--accent)" stroke-width="2.4"/>
+          <line x1="29" y1="23.5" x2="33" y2="27.5" stroke="var(--accent)" stroke-width="2.4"/>
+        </svg>
+        <span>Sherlock<span class="logo-accent">Mail</span></span>
+      </div>
+
+      <div class="nav-tabs">
+        <button type="button" class="case-switch" id="case-switch" onclick="switchTab('projects')" title="Switch to another project">
+          <span id="case-switch-label">No project open</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+      </div>
+
+      <div class="top-bar-right">
+        <div class="search-bar">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+          <label for="global-search" class="visually-hidden">Search messages</label>
+          <input type="text" id="global-search" placeholder="Search messages" onkeydown="if(event.key==='Enter') globalSearch()">
+          <label for="search-type" class="visually-hidden">Search type</label>
+          <select id="search-type">
+            <option value="basic">Basic</option>
+            <option value="inline">Inline</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="main-content">
+      <!-- Left Nav Sidebar -->
+      <nav class="left-nav" aria-label="Main">
+        <div class="left-nav-sections">
+          <div class="nav-section">
+            <button type="button" class="nav-main-tab active" data-group="projects" onclick="switchTab('projects')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+              Projects
+            </button>
+            <div class="nav-sub-tabs" data-group="projects">
+              <button type="button" class="nav-sub-tab active" data-tab="projects" onclick="switchTab('projects')">All projects</button>
+              <button type="button" class="nav-sub-tab" data-tab="tracker" onclick="switchTab('tracker')">Tracker</button>
+            </div>
+          </div>
+          <div class="nav-section">
+            <button type="button" class="nav-main-tab" data-group="collection" onclick="switchTab(currentProject ? 'project-detail' : 'projects')">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+              <span id="nav-case-name">This project</span>
+            </button>
+            <div class="nav-sub-tabs" data-group="collection">
+              <button type="button" class="nav-sub-tab" data-tab="collect" data-step="collected" onclick="switchTab('collect')"><span class="nav-step-num">1</span>Collect</button>
+              <button type="button" class="nav-sub-tab" data-tab="messages" onclick="switchTab('messages')"><span class="nav-step-num">2</span>Review</button>
+              <button type="button" class="nav-sub-tab" data-tab="forensics" data-step="checked" onclick="switchTab('forensics')"><span class="nav-step-num">3</span>Quality check</button>
+              <button type="button" class="nav-sub-tab" data-tab="export" data-step="exported" onclick="switchTab('export')"><span class="nav-step-num">4</span>Export</button>
+              <button type="button" class="nav-sub-tab" data-tab="audit" onclick="switchTab('audit')">Chain of custody</button>
+              <button type="button" class="nav-sub-tab" data-tab="project-detail" onclick="switchTab(currentProject ? 'project-detail' : 'projects')">Project details</button>
+            </div>
+          </div>
+          <div class="nav-section">
+            <div class="nav-sub-tabs" data-group="guide">
+              <button type="button" class="nav-sub-tab" data-tab="guide" onclick="switchTab('guide')">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+                Guide
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="left-nav-footer">
+          <button class="btn btn-primary btn-sm" onclick="switchTab('new-project')" style="width:100%;margin-bottom:10px">New project</button>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span class="version">v0.9.0</span>
+            <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark mode" id="theme-btn">
+              <svg id="theme-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+              </svg>
+              <svg id="theme-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none">
+                <circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+              </svg>
+              <span id="theme-label">Dark</span>
+            </button>
+          </div>
+        </div>
+      </nav>
+
+      <!-- Right Panel -->
+      <main class="right-panel">
+        <section class="case-tag" id="case-tag" aria-label="Open project">
+          <dl class="case-fields">
+            <div class="case-field case-name"><dt>Project</dt><dd id="tag-name"></dd></div>
+            <div class="case-field"><dt>Case ID</dt><dd id="tag-case-id"></dd></div>
+            <div class="case-field"><dt>Custodian</dt><dd id="tag-custodian"></dd></div>
+            <div class="case-field optional"><dt>Evidence ID</dt><dd id="tag-evidence-id"></dd></div>
+            <div class="case-field optional"><dt>Mailbox</dt><dd id="tag-mailbox"></dd></div>
+          </dl>
+          <div style="display:flex;align-items:center">
+            <ol class="custody-steps" id="custody-steps" aria-label="Custody steps"></ol>
+            <div class="case-next" id="case-next"></div>
+          </div>
+        </section>
+        <div class="right-stage">
+        <!-- Projects List View -->
+        <div id="view-projects" class="panel-view visible">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+            <h2 style="margin:0">Projects</h2>
+          </div>
+          <div id="projects-list-content">
+            <p style="color:var(--text-muted)">Loading projects...</p>
+          </div>
+        </div>
+
+        <!-- Messages View -->
+        <div id="view-messages" class="message-list-panel">
+          <div class="message-list-header">
+            <span id="message-list-title">Select a project to view messages</span>
+            <span class="msg-count" id="message-count"></span>
+          </div>
+          <div class="message-list" id="message-list">
+            <div class="empty-state">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+                <polyline points="22,6 12,13 2,6"/>
+              </svg>
+              <h3>No messages to review yet</h3>
+              <p>Open a project and collect its mailbox; collected messages appear here.</p>
+              <button type="button" class="btn btn-primary btn-sm" onclick="switchTab('projects')">Open a project</button>
+            </div>
+          </div>
+          <div class="message-viewer" id="message-viewer"></div>
+        </div>
+
+        <!-- New Project Panel -->
+        <div id="view-new-project" class="panel-view">
+          <h2>New Forensic Project</h2>
+          <form id="new-project-form" onsubmit="createProject(event)">
+            <div class="form-group">
+              <label for="proj-name">Project Name</label>
+              <input type="text" id="proj-name" required placeholder="e.g. Case 2024-001 Email Preservation">
+            </div>
+            <div class="form-group">
+              <label for="proj-email">Mailbox to collect</label>
+              <input type="email" id="proj-email" required placeholder="target@example.com">
+              <span class="form-hint">You choose how to connect to it (provider, server and sign-in) when you collect.</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
+              <div class="form-group">
+                <label for="proj-case-id">Case / Matter ID</label>
+                <input type="text" id="proj-case-id" placeholder="C1231234">
+              </div>
+              <div class="form-group">
+                <label for="proj-evidence-id">Evidence ID</label>
+                <input type="text" id="proj-evidence-id" placeholder="999-0001">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
+              <div class="form-group">
+                <label for="proj-custodian">Custodian Name</label>
+                <input type="text" id="proj-custodian" placeholder="Custodian name">
+              </div>
+              <div class="form-group">
+                <label for="proj-examiner">Examiner Name</label>
+                <input type="text" id="proj-examiner" placeholder="Examiner name">
+              </div>
+            </div>
+            <div style="margin-top:24px;display:flex;gap:12px">
+              <button type="submit" class="btn btn-primary">Create Project</button>
+              <button type="button" class="btn btn-secondary" onclick="switchTab('projects')">Cancel</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Project Detail Panel -->
+        <div id="view-project-detail" class="panel-view">
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+            <h2 id="project-detail-title" style="margin:0">Project Details</h2>
+            <span class="project-status" id="det-status-badge" style="font-size:11px"></span>
+          </div>
+          <div id="project-edit-locked" style="display:none;margin-bottom:16px;padding:10px 14px;border-radius:8px;background:var(--bg-surface);border:1px solid var(--warning);color:var(--warning);font-size:13px">
+            Warning: This project has completed collections. Any changes will be recorded in the Chain of Custody log as a post-collection modification.
+          </div>
+          <form id="project-detail-form" onsubmit="saveProjectDetails(event)">
+            <div class="form-group">
+              <label for="det-name">Project Name</label>
+              <input type="text" id="det-name" required placeholder="e.g. Case 2024-001 Email Preservation">
+            </div>
+            <div class="form-group">
+              <label for="det-email">Mailbox to collect</label>
+              <input type="email" id="det-email" required placeholder="target@example.com">
+              <span class="form-hint" id="det-connection"></span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
+              <div class="form-group">
+                <label for="det-case-id">Case / Matter ID</label>
+                <input type="text" id="det-case-id" placeholder="C1231234">
+              </div>
+              <div class="form-group">
+                <label for="det-evidence-id">Evidence ID</label>
+                <input type="text" id="det-evidence-id" placeholder="999-0001">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:500px">
+              <div class="form-group">
+                <label for="det-custodian">Custodian Name</label>
+                <input type="text" id="det-custodian" placeholder="Custodian name">
+              </div>
+              <div class="form-group">
+                <label for="det-examiner">Examiner Name</label>
+                <input type="text" id="det-examiner" placeholder="Examiner name">
+              </div>
+            </div>
+            <div id="project-detail-actions" style="margin-top:24px;display:flex;gap:12px">
+              <button type="submit" class="btn btn-primary" id="det-save-btn">Save Changes</button>
+              <button type="button" class="btn btn-secondary" onclick="switchTab('projects')">Back to Projects</button>
+              <button type="button" class="btn btn-secondary" onclick="openProjectReview()" style="margin-left:auto">Open in Review</button>
+            </div>
+          </form>
+        </div>
+
+        <!-- Search Panel -->
+        <div id="view-search" class="panel-view">
+          <h2>Forensic Search</h2>
+
+          <!-- Advanced Search Builder -->
+          <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:20px;max-width:750px">
+            <div style="display:flex;gap:8px;margin-bottom:12px">
+              <input type="text" id="adv-search-input" placeholder='Free text or inline syntax: from:john subject:"contract"' style="flex:1" onkeydown="if(event.key==='Enter') runAdvancedSearch()">
+              <button class="btn btn-primary" onclick="runAdvancedSearch()">Search</button>
+              <button class="btn btn-secondary btn-sm" onclick="clearAdvancedSearch()">Clear</button>
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div class="form-group" style="margin-bottom:0">
+                <label for="adv-from" style="font-size:12px">From</label>
+                <input type="text" id="adv-from" placeholder="sender@example.com" style="font-size:13px;padding:6px 10px">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label for="adv-to" style="font-size:12px">To</label>
+                <input type="text" id="adv-to" placeholder="recipient@example.com" style="font-size:13px;padding:6px 10px">
+              </div>
+            </div>
+
+            <div class="form-group" style="margin-bottom:12px">
+              <label for="adv-subject" style="font-size:12px">Subject contains</label>
+              <input type="text" id="adv-subject" placeholder="keyword or &quot;exact phrase&quot;" style="font-size:13px;padding:6px 10px;max-width:100%">
+            </div>
+
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+              <div class="form-group" style="margin-bottom:0">
+                <label for="adv-date-from" style="font-size:12px">Date from</label>
+                <input type="date" id="adv-date-from" style="font-size:13px;padding:6px 10px">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label for="adv-date-to" style="font-size:12px">Date to</label>
+                <input type="date" id="adv-date-to" style="font-size:13px;padding:6px 10px">
+              </div>
+              <div class="form-group" style="margin-bottom:0">
+                <label for="adv-min-size" style="font-size:12px">Min size (KB)</label>
+                <input type="number" id="adv-min-size" placeholder="0" min="0" style="font-size:13px;padding:6px 10px">
+              </div>
+            </div>
+
+            <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center">
+              <label class="toggle-label" style="font-size:13px"><input type="checkbox" id="adv-has-attachments"> Has attachments</label>
+              <label class="toggle-label" style="font-size:13px"><input type="checkbox" id="adv-encrypted"> Encrypted/Signed</label>
+              <div style="margin-left:auto;display:flex;gap:6px">
+                <button class="btn btn-secondary btn-sm" onclick="insertBoolOp('AND')" title="AND operator">AND</button>
+                <button class="btn btn-secondary btn-sm" onclick="insertBoolOp('OR')" title="OR operator">OR</button>
+                <button class="btn btn-secondary btn-sm" onclick="insertBoolOp('NOT')" title="NOT operator">NOT</button>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-bottom:16px">
+            <p style="font-size:11px;color:var(--text-muted);max-width:700px;line-height:1.5">
+              <strong style="color:var(--text-secondary)">Tip:</strong> Use the builder above or type inline syntax directly. Fields: from, to, cc, bcc, subject, messageid, sent, attachmentcount.
+              Wildcards: * and ?. Regex: /pattern/. Fuzzy: term~. Proximity: "word1 word2"~5
+            </p>
+          </div>
+          <div id="search-results"></div>
+        </div>
+
+        <!-- Projects Tracker Panel -->
+        <div id="view-tracker" class="panel-view">
+          <h2>Projects Tracker</h2>
+          <p style="color:var(--text-muted);margin-bottom:16px">Overview of all forensic email collection projects on this machine.</p>
+          <div id="tracker-content">
+            <p style="color:var(--text-muted)">Loading projects...</p>
+          </div>
+        </div>
+
+        <!-- Audit Log Panel -->
+        <div id="view-audit" class="panel-view">
+          <h2>Chain of custody</h2>
+          <div style="margin-bottom:20px;display:flex;gap:12px;align-items:center">
+            <button class="btn btn-secondary btn-sm" onclick="verifyChain()">Verify the log is unaltered</button>
+            <span id="chain-status"></span>
+          </div>
+          <div id="audit-content">
+            <p style="color:var(--text-muted)">Select a project to view its chain of custody audit log.</p>
+          </div>
+          <section style="margin-top:32px">
+            <h3 style="margin-bottom:8px;font-size:17px">Chain of custody report</h3>
+            <p style="color:var(--text-secondary);font-size:14px;margin-bottom:14px;max-width:72ch">A formal report of how the evidence was handled, aligned with NIST SP 800-86 and ISO/IEC 27037:2012, covering the audit trail's integrity and the applicable legal standards.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="loadCustody()">Generate report</button>
+              <span id="custody-status"></span>
+            </div>
+            <div id="custody-results"></div>
+          </section>
+        </div>
+
+        <!-- ========== COLLECT WIZARD ========== -->
+        <div id="view-collect" class="panel-view wizard-panel">
+          <!-- Stepper -->
+          <div class="wizard-stepper">
+            <div class="wizard-step active" data-step="1"><span class="step-num">1</span><span class="step-label">Connect</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="2"><span class="step-num">2</span><span class="step-label">Workflow</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="3"><span class="step-num">3</span><span class="step-label">Query</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="4"><span class="step-num">4</span><span class="step-label">Folders</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="5"><span class="step-num">5</span><span class="step-label">Preview</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="6"><span class="step-num">6</span><span class="step-label">Collecting</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="7"><span class="step-num">7</span><span class="step-label">Results</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="8"><span class="step-num">8</span><span class="step-label">QC Verify</span></div>
+            <div class="wizard-step-line"></div>
+            <div class="wizard-step" data-step="9"><span class="step-num">9</span><span class="step-label">Transfer <span style="font-size:9px;opacity:0.6">(optional)</span></span></div>
+          </div>
+
+          <div class="wizard-body">
+            <!-- Step 1: Connect -->
+            <div class="wizard-content active" id="wiz-step-1">
+              <h2>Step 1: Connection Setup</h2>
+              <p class="wizard-desc">Configure your connection to the target mailbox. Select a service provider or enter the email to auto-detect the best protocol.</p>
+              <div id="wiz-last-result" class="wiz-note" style="display:none"></div>
+              <div class="wizard-form">
+                <div class="form-group">
+                  <label for="wiz-provider">Service Provider</label>
+                  <select id="wiz-provider" onchange="wizProviderChanged()">
+                    <option value="">-- Auto-Detect from Email --</option>
+                    <option value="gmail">Gmail / Google Workspace</option>
+                    <option value="microsoft">Outlook / Microsoft 365</option>
+                    <option value="zoho">Zoho Mail</option>
+                    <option value="fastmail">Fastmail</option>
+                    <option value="yahoo">Yahoo Mail</option>
+                    <option value="aol">AOL Mail</option>
+                    <option value="icloud">iCloud Mail</option>
+                    <option value="protonmail">ProtonMail</option>
+                    <option value="yandex">Yandex Mail</option>
+                    <option value="other">Other / Custom</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label for="wiz-email">Target Email Address</label>
+                  <input type="email" id="wiz-email" placeholder="target@example.com" onblur="wizAutoDetectProvider()">
+                </div>
+                <div id="wiz-provider-note" style="display:none;margin-bottom:12px;padding:10px 14px;border-radius:8px;background:var(--bg-surface);border:1px solid var(--border);font-size:13px;color:var(--text-muted)"></div>
+                <div class="form-group">
+                  <label for="wiz-collection-profile">Collection Profile</label>
+                  <select id="wiz-collection-profile" onchange="wizProfileChanged()">
+                    <option value="">-- Select a profile --</option>
+                  </select>
+                </div>
+                <div id="wiz-profile-info" style="display:none;margin-bottom:12px;padding:12px 14px;border-radius:8px;background:var(--bg-surface);border:1px solid var(--border);font-size:13px">
+                  <div id="wiz-profile-desc" style="color:var(--text-muted);margin-bottom:8px"></div>
+                  <div style="display:flex;gap:16px;flex-wrap:wrap">
+                    <span id="wiz-profile-forensic" style="font-size:12px;font-weight:600"></span>
+                    <span id="wiz-profile-auth" style="font-size:12px;color:var(--text-muted)"></span>
+                  </div>
+                  <div id="wiz-profile-setup" style="margin-top:8px;font-size:12px;color:var(--text-muted)"></div>
+                  <div id="wiz-profile-limits" style="margin-top:6px;font-size:12px;color:var(--warning)"></div>
+                </div>
+                <input type="hidden" id="wiz-protocol" value="imap">
+                <div id="wiz-protocol-fields">
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="wiz-host">Server Host</label>
+                      <input type="text" id="wiz-host" placeholder="imap.gmail.com">
+                    </div>
+                    <div class="form-group">
+                      <label for="wiz-port">Port</label>
+                      <input type="number" id="wiz-port" value="993">
+                    </div>
+                  </div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="wiz-auth-method">Auth Method</label>
+                      <select id="wiz-auth-method" onchange="wizUpdateAuthLabel()">
+                        <option value="password">Password</option>
+                        <option value="app-password">App-Specific Password</option>
+                        <option value="oauth2">OAuth 2.0</option>
+                      </select>
+                    </div>
+                    <div class="form-group">
+                      <label for="wiz-password" id="wiz-pass-label">Password</label>
+                      <input type="password" id="wiz-password" placeholder="Enter password" autocomplete="off" data-lpignore="true">
+                    </div>
+                  </div>
+                  <div class="form-group">
+                    <label for="wiz-username">Username (defaults to email)</label>
+                    <input type="text" id="wiz-username" placeholder="Optional — leave blank to use email">
+                  </div>
+                  <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+                    <label class="toggle-label"><input type="checkbox" id="wiz-tls" checked> Use TLS</label>
+                  </div>
+                </div>
+                <div id="wiz-gmail-oauth" style="display:none;margin-bottom:16px">
+                  <div style="padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-surface)">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                      <span id="gmail-oauth-status" style="font-size:13px;color:var(--text-muted)">Checking authorization...</span>
+                    </div>
+                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                      <button type="button" class="btn btn-primary" onclick="gmailAuthorize()">Authorize with Google</button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="gmailCheckStatus()">Check Status</button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="gmailRevoke()" style="color:var(--danger)">Revoke Access</button>
+                    </div>
+                    <div style="margin-top:12px">
+                      <label style="font-size:12px;color:var(--text-muted);cursor:pointer">
+                        <input type="file" id="gmail-creds-file" accept=".json" onchange="gmailUploadCredentials(this)" style="display:none">
+                        Upload client_secret JSON (one-time setup)
+                      </label>
+                    </div>
+                  </div>
+                </div>
+                <div id="wiz-microsoft-oauth" style="display:none;margin-bottom:16px">
+                  <div style="padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-surface)">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                      <span id="ms-oauth-status" style="font-size:13px;color:var(--text-muted)">Checking authorization...</span>
+                    </div>
+                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                      <button type="button" class="btn btn-primary" onclick="msAuthorize()">Authorize with Microsoft</button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="msCheckStatus()">Check Status</button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="msRevoke()" style="color:var(--danger)">Revoke Access</button>
+                    </div>
+                    <div id="ms-creds-form" style="margin-top:12px">
+                      <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">One-time setup — from Azure AD App Registration:</p>
+                      <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <input type="text" id="ms-client-id" placeholder="Application (client) ID" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                        <input type="password" id="ms-client-secret" placeholder="Client secret value" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="msSaveCredentials()">Save</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div id="wiz-ews-section" style="display:none;margin-bottom:16px">
+                  <div style="padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-surface)">
+                    <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Optional — leave blank for autodiscover or Office 365 default:</p>
+                    <input type="text" id="wiz-ews-url" placeholder="EWS URL (e.g. https://mail.contoso.com/EWS/Exchange.asmx)" style="width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                    <p style="font-size:11px;color:var(--text-muted);margin-top:6px">For on-prem Exchange: enter the server URL and use host/password fields above. For Office 365: use Microsoft OAuth above instead.</p>
+                  </div>
+                </div>
+                <div id="wiz-zoho-oauth" style="display:none;margin-bottom:16px">
+                  <div style="padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-surface)">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                      <span id="zoho-oauth-status" style="font-size:13px;color:var(--text-muted)">Checking authorization...</span>
+                    </div>
+                    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+                      <button type="button" class="btn btn-primary" onclick="zohoAuthorize()">Authorize with Zoho</button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="zohoCheckStatus()">Check Status</button>
+                      <button type="button" class="btn btn-secondary btn-sm" onclick="zohoRevoke()" style="color:var(--danger)">Revoke Access</button>
+                    </div>
+                    <div style="margin-top:12px">
+                      <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">One-time setup — from Zoho API Console (api-console.zoho.com):</p>
+                      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+                        <input type="text" id="zoho-client-id" placeholder="Client ID" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                        <input type="password" id="zoho-client-secret" placeholder="Client Secret" style="flex:1;min-width:200px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                      </div>
+                      <div style="display:flex;gap:8px;align-items:center">
+                        <select id="zoho-region" style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                          <option value="us">US (.com)</option>
+                          <option value="eu">EU (.eu)</option>
+                          <option value="in">India (.in)</option>
+                          <option value="au">Australia (.com.au)</option>
+                          <option value="jp">Japan (.jp)</option>
+                        </select>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="zohoSaveCredentials()">Save</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div id="wiz-fastmail-auth" style="display:none;margin-bottom:16px">
+                  <div style="padding:16px;border:1px solid var(--border);border-radius:8px;background:var(--bg-surface)">
+                    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+                      <span id="fm-auth-status" style="font-size:13px;color:var(--text-muted)">Checking API token...</span>
+                    </div>
+                    <div style="margin-top:8px">
+                      <p style="font-size:12px;color:var(--text-muted);margin-bottom:8px">Generate an API token in Fastmail: Settings &gt; Privacy &amp; Security &gt; API tokens</p>
+                      <div style="display:flex;gap:8px;flex-wrap:wrap">
+                        <input type="password" id="fm-api-token" placeholder="Fastmail API token" style="flex:1;min-width:280px;padding:6px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input);color:var(--text);font-size:13px">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="fmSaveToken()">Save Token</button>
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="fmRevoke()" style="color:var(--danger)">Remove</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div style="display:flex;gap:12px;align-items:center">
+                  <button type="button" class="btn btn-primary" onclick="wizTestConnection()">Test Connection</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="wizDetectProvider()">Auto-Detect Provider</button>
+                  <span id="wiz-conn-status"></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 2: Workflow -->
+            <div class="wizard-content" id="wiz-step-2">
+              <h2>Step 2: Select Workflow</h2>
+              <p class="wizard-desc">Choose what to collect, the output format, attachment options, and the save location for the forensic collection.</p>
+              <div class="wizard-form">
+                <div class="wiz-section">
+                  <h3 class="wiz-section-title">Collection Scope</h3>
+                  <div class="wiz-scope-grid" role="radiogroup" aria-label="Collection scope">
+                    <label class="wiz-toggle-card">
+                      <input type="radio" name="wiz-scope" value="email" checked onchange="wizScopeChanged()">
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                        <span>Email</span>
+                        <span class="toggle-hint">Mailbox messages from the folders selected in Step 4</span>
+                      </div>
+                    </label>
+                    <label class="wiz-toggle-card">
+                      <input type="radio" name="wiz-scope" value="drive" onchange="wizScopeChanged()">
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+                        <span>Drive / Cloud</span>
+                        <span class="toggle-hint">Files in the account's Google Drive or OneDrive</span>
+                      </div>
+                    </label>
+                    <label class="wiz-toggle-card">
+                      <input type="radio" name="wiz-scope" value="both" onchange="wizScopeChanged()">
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>
+                        <span>Both</span>
+                        <span class="toggle-hint">Email first, then the account's drive files</span>
+                      </div>
+                    </label>
+                  </div>
+                  <div id="wiz-scope-note" class="wiz-note" style="display:none"></div>
+                </div>
+
+                <div class="wiz-section">
+                  <h3 class="wiz-section-title">Acquisition Mode</h3>
+                  <label class="toggle-label"><input type="checkbox" id="wiz-differential"> Differential collection: skip messages already collected for this project</label>
+                  <span class="form-hint" id="wiz-differential-hint">Restarting a collection into a destination that already holds this project's collection is always differential, and is saved in a "Differential Acquisition" folder inside it.</span>
+                </div>
+
+                <div class="wiz-section">
+                  <h3 class="wiz-section-title">Output Format</h3>
+                  <div class="wiz-format-grid">
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="eml" checked>
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+                        </div>
+                        <span class="format-name">EML (MIME)</span>
+                        <span class="format-desc">Original email format, individual files per message</span>
+                      </div>
+                    </label>
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="mbox">
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><line x1="2" y1="9" x2="22" y2="9"/></svg>
+                        </div>
+                        <span class="format-name">MBOX</span>
+                        <span class="format-desc">Unix mailbox format, single file per folder</span>
+                      </div>
+                    </label>
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="msg">
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                        </div>
+                        <span class="format-name">MSG</span>
+                        <span class="format-desc">Containerized message format</span>
+                      </div>
+                    </label>
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="pst">
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        </div>
+                        <span class="format-name">PST</span>
+                        <span class="format-desc">Outlook PST with the collected folders, split by size</span>
+                      </div>
+                    </label>
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="mime">
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                        </div>
+                        <span class="format-name">MIME (Raw)</span>
+                        <span class="format-desc">Raw MIME source for forensic integrity</span>
+                      </div>
+                    </label>
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="pdf" onchange="toggleWizPdfSplit()">
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+                        </div>
+                        <span class="format-name">PDF Report</span>
+                        <span class="format-desc">Printable report with full metadata</span>
+                      </div>
+                    </label>
+                    <label class="wiz-format-card">
+                      <input type="checkbox" name="wiz-format" value="concordance">
+                      <div class="format-card-body">
+                        <div class="format-icon">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                        </div>
+                        <span class="format-name">Concordance DAT</span>
+                        <span class="format-desc">eDiscovery load file for review platforms</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="wiz-sub-options" id="wiz-pdf-options" style="display:none">
+                  <h4>PDF Split Mode</h4>
+                  <div class="form-group">
+                    <label for="wiz-pdf-split-mode">How to split PDF output</label>
+                    <select id="wiz-pdf-split-mode" style="max-width:350px">
+                      <option value="all">All Emails — Single PDF</option>
+                      <option value="folder">Per Folder — One PDF per mailbox folder</option>
+                      <option value="thread" selected>Per Thread — One PDF per conversation thread</option>
+                      <option value="email">Per Email — One PDF per individual message</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="wiz-sub-options" id="wiz-pst-options" style="display:none">
+                  <h4>PST Options</h4>
+                  <div class="form-group">
+                    <label for="wiz-pst-size">Split Output PST Size Limit</label>
+                    <div style="display:flex;gap:12px;align-items:center;max-width:400px">
+                      <input type="range" id="wiz-pst-size" min="1" max="100" value="10" oninput="document.getElementById('wiz-pst-display').textContent=this.value+'GB'" style="flex:1">
+                      <span id="wiz-pst-display" class="range-display">10GB</span>
+                    </div>
+                    <span class="form-hint">Recommended: 10GB per PST file</span>
+                  </div>
+                </div>
+
+                <div class="wiz-section">
+                  <h3 class="wiz-section-title">Attachments</h3>
+                  <p class="form-hint" style="margin:-4px 0 12px">Attachments always stay inside each collected email, which is never changed. These options collect more alongside it.</p>
+                  <div class="wiz-toggle-row">
+                    <label class="wiz-toggle-card">
+                      <input type="checkbox" id="wiz-collect-drive" checked>
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+                        <span>Download linked cloud files</span>
+                        <span class="toggle-hint">After the mail is collected, files linked from Google Drive, OneDrive or SharePoint are downloaded with the Google or Microsoft account signed in to SherlockMail and hashed. Links that can't be downloaded (Dropbox, Box, no access) are listed with the reason.</span>
+                      </div>
+                    </label>
+                    <label class="wiz-toggle-card">
+                      <input type="checkbox" id="wiz-collect-modern" checked>
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                        <span>Save attachments as separate files</span>
+                        <span class="toggle-hint">Each attachment (attached or inline) is also saved as its own file, hashed, in a folder beside its email.</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="wiz-section">
+                  <h3 class="wiz-section-title">Destination Folder</h3>
+                  <div class="form-group">
+                    <label for="wiz-output-dir">Save Collection To</label>
+                    <div style="display:flex;gap:8px;align-items:center">
+                      <input type="text" id="wiz-output-dir" placeholder="Leave blank for default (./output/<project-id>)" style="flex:1">
+                      <button class="btn btn-secondary" onclick="wizPickFolder()" style="white-space:nowrap;padding:8px 16px" title="Browse for folder">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;vertical-align:middle;margin-right:4px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        Browse
+                      </button>
+                    </div>
+                    <span class="form-hint">Absolute path to the destination folder where collected data and exports will be stored</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 3: Query -->
+            <div class="wizard-content" id="wiz-step-3">
+              <h2>Step 3: Query Builder</h2>
+              <p class="wizard-desc">Optionally filter which emails to collect. Leave empty to collect all mail from selected folders. Separate several terms with commas: a message matches a field if it contains any of them, and it must match every field you fill in.</p>
+              <div class="wizard-form">
+                <div class="wiz-section" style="margin-bottom:16px">
+                  <h3 class="wiz-section-title">Search Type</h3>
+                  <div style="display:flex;gap:12px">
+                    <label class="wiz-toggle-card" style="flex:1">
+                      <input type="radio" name="wiz-query-type" value="in-place" checked>
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                        <span>In-place query</span>
+                        <span class="toggle-hint">Only matching messages are kept. The server filters what it can; anything else is checked on each downloaded message, and messages that don't match are logged with their hash, not kept.</span>
+                      </div>
+                    </label>
+                    <label class="wiz-toggle-card" style="flex:1">
+                      <input type="radio" name="wiz-query-type" value="in-line">
+                      <div class="toggle-card-body">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:20px;height:20px"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+                        <span>In-line query</span>
+                        <span class="toggle-hint">Every message in the selected folders is collected; the ones that match are tagged and listed.</span>
+                      </div>
+                    </label>
+                  </div>
+                </div>
+                <div class="wiz-section">
+                  <div class="wiz-optional-badge">Optional</div>
+                  <div class="form-row">
+                    <div class="form-group">
+                      <label for="wiz-date-from">Date From</label>
+                      <input type="date" id="wiz-date-from">
+                    </div>
+                    <div class="form-group">
+                      <label for="wiz-date-to">Date To</label>
+                      <input type="date" id="wiz-date-to">
+                    </div>
+                  </div>
+                  <span class="form-hint" style="margin:-10px 0 16px">Dates are inclusive and use the date each message was received.</span>
+                  <div class="form-group">
+                    <label for="wiz-query-from">From (name or address)</label>
+                    <input type="text" id="wiz-query-from" placeholder="e.g. john@example.com, Jane Smith">
+                  </div>
+                  <div class="form-group">
+                    <label for="wiz-query-to">To / Cc (name or address)</label>
+                    <input type="text" id="wiz-query-to" placeholder="e.g. jane@example.com">
+                  </div>
+                  <div class="form-group">
+                    <label for="wiz-query-subject">Subject Contains</label>
+                    <input type="text" id="wiz-query-subject" placeholder="e.g. contract, agreement">
+                  </div>
+                  <div class="form-group">
+                    <label for="wiz-query-keywords">Keywords (body search)</label>
+                    <input type="text" id="wiz-query-keywords" placeholder="e.g. confidential, merger">
+                  </div>
+                  <div style="display:flex;gap:16px;flex-wrap:wrap">
+                    <label class="toggle-label"><input type="checkbox" id="wiz-query-attachments"> Has Attachments Only</label>
+                    <label class="toggle-label"><input type="checkbox" id="wiz-query-unread"> Unread Only</label>
+                  </div>
+                  <div class="wiz-query-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="wizClearQuery()">Clear Query</button>
+                  </div>
+                  <div id="wiz-query-error" class="wiz-note wiz-note-error" role="alert" style="display:none"></div>
+                  <div id="wiz-query-summary" class="wiz-note" aria-live="polite"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 4: Folders -->
+            <div class="wizard-content" id="wiz-step-4">
+              <h2>Step 4: Select Folders</h2>
+              <p class="wizard-desc">Choose which mail folders or labels to include in the collection.</p>
+              <div class="wizard-form">
+                <div class="wiz-folders-toolbar">
+                  <button class="btn btn-primary btn-sm" onclick="wizLoadFolders()">Load Folders from Server</button>
+                  <button class="btn btn-secondary btn-sm" onclick="wizSelectAllFolders()">Select All</button>
+                  <button class="btn btn-secondary btn-sm" onclick="wizDeselectAllFolders()">Deselect All</button>
+                  <input type="search" id="wiz-folder-filter" class="wiz-folder-filter" placeholder="Filter folders..." oninput="wizFilterFolders()" aria-label="Filter folders">
+                  <span id="wiz-folder-summary" class="wiz-folder-summary" aria-live="polite"></span>
+                </div>
+                <div id="wiz-folders-list" class="wiz-folders-list">
+                  <div class="empty-state" style="height:200px">
+                    <p>Click "Load Folders from Server" to fetch available mail folders.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 5: Preview -->
+            <div class="wizard-content" id="wiz-step-5">
+              <h2>Step 5: Collection Preview</h2>
+              <p class="wizard-desc">Review your collection settings before starting. SherlockMail lists the selected folders on the server (nothing is downloaded) to count the unique items and their size with your query applied.</p>
+              <div id="wiz-preview-content" class="wizard-form wizard-form-wide">
+                <div id="wiz-preview-notice"></div>
+                <div class="wiz-preview-grid" id="wiz-preview-summary"></div>
+                <div class="wiz-estimate-actions">
+                  <button type="button" class="btn btn-secondary btn-sm" id="wiz-estimate-btn" onclick="wizRunEstimate()">Recalculate Estimate</button>
+                  <span id="wiz-estimate-status" aria-live="polite"></span>
+                </div>
+                <div id="wiz-estimate-detail"></div>
+              </div>
+            </div>
+
+            <!-- Step 6: Collecting -->
+            <div class="wizard-content" id="wiz-step-6">
+              <h2>Step 6: Collection in Progress</h2>
+              <div class="wiz-collect-warning" role="note">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <div>
+                  <strong>Do not close SherlockMail while collecting.</strong>
+                  You can switch to other tabs; the collection keeps running in the background and this page picks it up again when you return. Closing the application stops the collection (you will be asked to confirm).
+                </div>
+              </div>
+              <div class="wizard-form wizard-form-wide">
+                <div class="wiz-progress-section">
+                  <div class="wiz-progress-target" id="wiz-progress-target"></div>
+                  <div class="wiz-progress-head">
+                    <div class="wiz-progress-count"><strong id="wiz-progress-done">0</strong> of <span id="wiz-progress-total">0</span> items</div>
+                    <div class="wiz-progress-eta" id="wiz-progress-eta">Estimating time remaining...</div>
+                  </div>
+                  <div class="wiz-progress-bar-track">
+                    <div class="wiz-progress-bar-fill" id="wiz-progress-fill" style="width:0%"></div>
+                  </div>
+                  <div class="wiz-progress-sub">
+                    <span id="wiz-progress-pct"></span>
+                    <span id="wiz-progress-rate"></span>
+                    <span id="wiz-progress-finish"></span>
+                  </div>
+                  <div class="wiz-progress-label" id="wiz-progress-label">Initializing...</div>
+                  <div class="wiz-progress-hint" id="wiz-progress-hint" role="status"></div>
+                  <div class="wiz-progress-drive" id="wiz-progress-drive" style="display:none"></div>
+                  <div class="wiz-progress-stats" id="wiz-progress-stats"></div>
+                  <div class="wiz-progress-controls">
+                    <button type="button" class="btn btn-secondary btn-sm" id="wiz-stop-btn" onclick="wizStopCollection()">Stop Collection</button>
+                    <span id="wiz-progress-errors"></span>
+                  </div>
+                  <div class="wiz-feed-title">Collected items (newest first)</div>
+                  <div class="wiz-log-output" id="wiz-log-output"></div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Step 7: Results -->
+            <div class="wizard-content" id="wiz-step-7">
+              <h2>Step 7: Collection Results</h2>
+              <p class="wizard-desc">Collection finished. Review the results and any errors below.</p>
+              <div class="wizard-form wizard-form-wide">
+                <div id="wiz-results-content"></div>
+                <div class="wiz-next-actions">
+                  <p>Next, check the collection in step 8, or go straight to the messages. Formats chosen in step 2 were exported automatically.</p>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab('messages')">Review messages</button>
+                  <button type="button" class="btn btn-secondary btn-sm" onclick="switchTab('export')">Export another format</button>
+                </div>
+                <div id="wiz-results-errors" style="margin-top:20px"></div>
+                <div id="wiz-results-logs" style="margin-top:20px"></div>
+              </div>
+            </div>
+
+            <!-- Step 8: QC Verify -->
+            <div class="wizard-content" id="wiz-step-8">
+              <h2>Step 8: Quality check</h2>
+              <p class="wizard-desc">Quality checks run on the Quality check screen, the same place you check the whole project later. This collection is selected for you there.</p>
+              <div class="wizard-form">
+                <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+                  <button class="btn btn-primary" onclick="openQualityCheck('collection')">Check this collection</button>
+                </div>
+                <p class="form-hint">Come back to Collect afterwards for the optional transfer in step 9; the wizard keeps its place.</p>
+              </div>
+            </div>
+
+            <!-- Step 9: Transfer -->
+            <div class="wizard-content" id="wiz-step-9">
+              <h2>Step 9: Transfer</h2>
+              <p class="wizard-desc">Transfer collected data to an external location using Robocopy. Optionally zip the data with 7-Zip before or after transfer.</p>
+              <div class="wizard-form">
+                <div class="wiz-section">
+                  <div class="wiz-optional-badge">Optional</div>
+                  <h3 class="wiz-section-title">Transfer Collection</h3>
+                  <div class="form-group">
+                    <label for="wiz-transfer-source">Source Directory</label>
+                    <input type="text" id="wiz-transfer-source" placeholder="Auto-filled from collection output" readonly>
+                  </div>
+                  <div class="form-group">
+                    <label for="wiz-transfer-dest">Destination Directory</label>
+                    <div style="display:flex;gap:8px;align-items:center">
+                      <input type="text" id="wiz-transfer-dest" placeholder="e.g. \\\\server\\share\\case-001 or D:\\Evidence\\case-001" style="flex:1">
+                      <button class="btn btn-secondary" onclick="wizPickTransferDest()" style="white-space:nowrap;padding:8px 16px" title="Browse for folder">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px;vertical-align:middle;margin-right:4px"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        Browse
+                      </button>
+                    </div>
+                    <span class="form-hint">Enter the full path to the destination folder.</span>
+                  </div>
+                  <div class="form-group">
+                    <label for="wiz-transfer-mode">Transfer Mode</label>
+                    <select id="wiz-transfer-mode" onchange="wizToggleZipOptions()">
+                      <option value="unzipped">Unzipped (Robocopy folder copy)</option>
+                      <option value="zipped">Zipped (7-Zip archive)</option>
+                    </select>
+                  </div>
+                  <div id="wiz-zip-options" style="display:none">
+                    <div class="form-group">
+                      <label for="wiz-zip-password">Zip Password <span style="font-size:11px;opacity:0.6">(optional)</span></label>
+                      <input type="password" id="wiz-zip-password" placeholder="Leave blank for no password" autocomplete="off">
+                      <span class="form-hint">If set, the .7z archive will be password-protected (AES-256 encryption).</span>
+                    </div>
+                  </div>
+                  <div style="display:flex;gap:12px;align-items:center">
+                    <button class="btn btn-primary" onclick="wizTransfer()">Transfer Collection</button>
+                    <span id="wiz-transfer-status"></span>
+                  </div>
+                  <div id="wiz-transfer-result" style="margin-top:20px"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Wizard Navigation -->
+          <div class="wizard-nav">
+            <button class="btn btn-secondary" id="wiz-btn-back" onclick="wizBack()" style="visibility:hidden">Back</button>
+            <div class="wizard-step-indicator" id="wiz-step-indicator">Step 1 of 9</div>
+            <button class="btn btn-primary" id="wiz-btn-next" onclick="wizNext()">Next</button>
+          </div>
+        </div>
+
+        <!-- ========== EXPORT TAB ========== -->
+        <div id="view-export" class="panel-view">
+          <h2>Export Collection</h2>
+          <p class="wizard-desc">Export collected messages to forensic-standard formats with automatic RFC 3161 timestamping.</p>
+          <div class="wizard-form">
+            <div class="form-group">
+              <label for="export-format">Export Format</label>
+              <select id="export-format" style="max-width:300px" onchange="togglePdfSplitMode()">
+                <option value="eml">EML (MIME) — Individual files</option>
+                <option value="mbox">MBOX — Unix mailbox</option>
+                <option value="msg">MSG — Containerized</option>
+                <option value="pst">PST — Outlook data file</option>
+                <option value="mime">MIME — Raw source</option>
+                <option value="pdf">PDF Report — Printable HTML</option>
+                <option value="concordance">Concordance DAT — eDiscovery load file</option>
+                <option value="xml">XML — Structured data export</option>
+              </select>
+            </div>
+            <div class="form-group" id="pdf-split-group" style="display:none">
+              <label for="pdf-split-mode">PDF Split Mode</label>
+              <select id="pdf-split-mode" style="max-width:300px">
+                <option value="all">All Emails — Single PDF</option>
+                <option value="folder">Per Folder — One PDF per mailbox folder</option>
+                <option value="thread" selected>Per Thread — One PDF per conversation thread</option>
+                <option value="email">Per Email — One PDF per individual message</option>
+              </select>
+            </div>
+            <div class="form-group" id="pst-size-group" style="display:none">
+              <label for="pst-size">Split PST files at</label>
+              <div style="display:flex;gap:12px;align-items:center;max-width:300px">
+                <input type="range" id="pst-size" min="1" max="50" value="10" oninput="document.getElementById('pst-size-display').textContent=this.value+' GB'" style="flex:1">
+                <span id="pst-size-display" class="range-display">10 GB</span>
+              </div>
+              <span class="form-hint">Each item is converted from its original collected MIME; pst_item_map.csv links every item to that message's SHA-256.</span>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:24px">
+              <button class="btn btn-primary" onclick="runExport()">Export</button>
+              <span id="export-status"></span>
+            </div>
+            <div id="export-results"></div>
+            <div id="export-history" style="margin-top:32px"></div>
+
+            <h3 style="margin:32px 0 8px;font-size:15px">Convert EML / MBOX files to PST</h3>
+            <p class="form-hint" style="margin-bottom:12px">Converts messages already on disk (a folder of .eml files, .mbox mailboxes, or a single file). The source files are only read.</p>
+            <div class="form-group">
+              <label for="convert-input">Source folder or file</label>
+              <div style="display:flex;gap:8px;max-width:640px">
+                <input type="text" id="convert-input" placeholder="C:\Evidence\Mail" style="flex:1">
+                <button class="btn btn-secondary" type="button" onclick="pickConvertPath('convert-input')">Browse</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="convert-output">Output folder</label>
+              <div style="display:flex;gap:8px;max-width:640px">
+                <input type="text" id="convert-output" placeholder="Leave empty to use SherlockMail's data folder" style="flex:1">
+                <button class="btn btn-secondary" type="button" onclick="pickConvertPath('convert-output')">Browse</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+              <button class="btn btn-primary" onclick="runPstConvert()">Convert to PST</button>
+              <span id="convert-status" role="status"></span>
+            </div>
+            <div id="convert-results"></div>
+          </div>
+        </div>
+
+        <!-- ========== FORENSICS TAB ========== -->
+        <div id="view-forensics" class="panel-view">
+          <h2>Quality check</h2>
+          <p class="wizard-desc" style="margin-bottom:24px">Check the evidence before exporting it. Run checks covers everything in one pass; the other tabs look at one aspect on its own.</p>
+
+          <!-- Forensics Sub-tabs -->
+          <div class="sub-tabs" id="forensics-sub-tabs">
+            <div class="sub-tab active" data-subtab="combined" onclick="switchForensicsTab('combined')">Run checks</div>
+            <div class="sub-tab" data-subtab="cloud" onclick="switchForensicsTab('cloud')">Cloud Attachments</div>
+            <div class="sub-tab" data-subtab="timestamps" onclick="switchForensicsTab('timestamps')">RFC 3161 Timestamps</div>
+            <div class="sub-tab" data-subtab="integrity" onclick="switchForensicsTab('integrity')">Evidence Integrity</div>
+            <div class="sub-tab" data-subtab="timeline" onclick="switchForensicsTab('timeline')">Timeline</div>
+            <div class="sub-tab" data-subtab="relationships" onclick="switchForensicsTab('relationships')">Relationships</div>
+            <div class="sub-tab" data-subtab="threading" onclick="switchForensicsTab('threading')">Threading</div>
+            <div class="sub-tab" data-subtab="dedup" onclick="switchForensicsTab('dedup')">Dedup</div>
+          </div>
+
+          <!-- Run checks: the one place quality checks run -->
+          <div class="sub-panel active" id="forensics-combined">
+            <p style="color:var(--text-secondary);font-size:14px;margin-bottom:16px;max-width:72ch">Re-hashes every collected file against its recorded hash and runs the 11 quality checks, the cloud attachment scan, evidence integrity verification, threading and duplicate analysis. The result is recorded in the chain of custody.</p>
+            <div class="form-group" style="margin-bottom:14px">
+              <label for="qc-scope">Check</label>
+              <select id="qc-scope" style="max-width:360px">
+                <option value="collection">The latest collection</option>
+                <option value="project">Every message in this project</option>
+              </select>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="runCombinedQC()">Run quality check</button>
+              <span id="combined-qc-status" role="status"></span>
+            </div>
+            <div id="combined-qc-results"></div>
+          </div>
+
+          <!-- Cloud Sub-panel -->
+          <div class="sub-panel" id="forensics-cloud">
+            <h3 style="margin-bottom:16px">Cloud Attachment Detection</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Scans email bodies for Google Drive, OneDrive, SharePoint, Dropbox, and Box links.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="runCloudScan()">Scan for Cloud Links</button>
+              <span id="cloud-status"></span>
+            </div>
+            <div id="cloud-results"></div>
+          </div>
+
+          <!-- Timestamps Sub-panel -->
+          <div class="sub-panel" id="forensics-timestamps">
+            <h3 style="margin-bottom:16px">RFC 3161 Timestamps</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Create cryptographic timestamps to prove data existed at a specific time.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px;flex-wrap:wrap">
+              <button class="btn btn-primary" onclick="createTimestamp('collection')">Timestamp Collection</button>
+              <button class="btn btn-secondary" onclick="createTimestamp('export')">Timestamp Latest Export</button>
+              <span id="ts-status"></span>
+            </div>
+            <div id="ts-results"></div>
+          </div>
+
+          <!-- Integrity Sub-panel -->
+          <div class="sub-panel" id="forensics-integrity">
+            <h3 style="margin-bottom:16px">Evidence Integrity Verification</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Comprehensive verification of hash integrity, audit chain, exports, and RFC 3161 timestamps.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="verifyIntegrity()">Verify All Evidence</button>
+              <span id="integrity-status"></span>
+            </div>
+            <div id="integrity-results"></div>
+          </div>
+
+          <!-- Timeline Sub-panel -->
+          <div class="sub-panel" id="forensics-timeline">
+            <h3 style="margin-bottom:16px">Email Activity Timeline</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Visualize email volume over time, hourly patterns, and day-of-week distribution.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="loadTimeline()">Load Timeline</button>
+              <span id="timeline-status"></span>
+            </div>
+            <div id="timeline-results"></div>
+          </div>
+
+          <!-- Relationships Sub-panel -->
+          <div class="sub-panel" id="forensics-relationships">
+            <h3 style="margin-bottom:16px">Communication Relationships</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Map who communicates with whom — top contacts, pair frequencies, and communication direction.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="loadRelationships()">Analyze Relationships</button>
+              <span id="relationships-status"></span>
+            </div>
+            <div id="relationships-results"></div>
+          </div>
+
+          <!-- Threading Sub-panel -->
+          <div class="sub-panel" id="forensics-threading">
+            <h3 style="margin-bottom:16px">Email Threading (Conversation Grouping)</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Groups replies and forwards into conversations using Message-ID, In-Reply-To, and References headers per RFC 5322. Falls back to normalized subject matching (JWZ algorithm).</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="loadThreading()">Analyze Threads</button>
+              <span id="threading-status"></span>
+            </div>
+            <div id="threading-results"></div>
+          </div>
+
+          <!-- Dedup Sub-panel -->
+          <div class="sub-panel" id="forensics-dedup">
+            <h3 style="margin-bottom:16px">Deduplication Analysis</h3>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Identifies exact duplicates (SHA-256 hash match) and near-duplicates (normalized content comparison). Per EDRM Processing Guidelines for defensible deduplication.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+              <button class="btn btn-primary" onclick="loadDedup()">Scan for Duplicates</button>
+              <span id="dedup-status"></span>
+            </div>
+            <div id="dedup-results"></div>
+          </div>
+
+          <!-- Chain of Custody Sub-panel -->
+        </div>
+
+        <!-- ========== GUIDE TAB ========== -->
+        <div id="view-guide" class="panel-view">
+          <div class="guide-container">
+            <h2>SherlockMail v0.9.0 User Guide</h2>
+            <p class="wizard-desc" style="margin-bottom:16px">Forensic email collection, verification, and export documentation.</p>
+
+            <div style="margin-bottom:24px;max-width:500px">
+              <div style="position:relative">
+                <input type="text" id="guide-search-input" class="guide-search-input" placeholder="Search the guide..." oninput="guideSearch(this.value)" style="width:100%;padding-right:36px">
+                <span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--text-muted);pointer-events:none;font-size:14px">&#x1F50D;</span>
+              </div>
+              <div id="guide-search-results" style="margin-top:8px;font-size:13px;color:var(--text-secondary);display:none"></div>
+            </div>
+
+            <div class="guide-toc">
+              <h3>Contents</h3>
+              <ol>
+                <li><a href="#" onclick="guideScroll('guide-overview')">Overview</a></li>
+                <li><a href="#" onclick="guideScroll('guide-getting-started')">Getting Started</a></li>
+                <li><a href="#" onclick="guideScroll('guide-protocols')">Supported Protocols</a></li>
+                <li><a href="#" onclick="guideScroll('guide-collection')">Running a Collection</a></li>
+                <li><a href="#" onclick="guideScroll('guide-formats')">Export Formats</a></li>
+                <li><a href="#" onclick="guideScroll('guide-qc')">Quality Control</a></li>
+                <li><a href="#" onclick="guideScroll('guide-cloud')">Cloud Attachments</a></li>
+                <li><a href="#" onclick="guideScroll('guide-timestamps')">RFC 3161 Timestamps</a></li>
+                <li><a href="#" onclick="guideScroll('guide-search')">Inline Search</a></li>
+                <li><a href="#" onclick="guideScroll('guide-custody')">Chain of Custody</a></li>
+                <li><a href="#" onclick="guideScroll('guide-integrity')">Evidence Integrity</a></li>
+                <li><a href="#" onclick="guideScroll('guide-security')">Security &amp; Forensic Integrity</a></li>
+                <li><a href="#" onclick="guideScroll('guide-standards')">DFIR Standards Compliance</a></li>
+              </ol>
+            </div>
+
+            <section id="guide-overview" class="guide-section">
+              <h3>Overview</h3>
+              <p>SherlockMail v0.9.0 is a forensic email collection tool designed for legal, compliance, and investigative professionals. It supports 7 email protocols, provides comprehensive quality control, cloud attachment detection, RFC 3161 timestamping, and maintains a tamper-evident chain of custody.</p>
+              <div class="guide-features">
+                <div class="guide-feature">
+                  <strong>7 Email Protocols</strong>
+                  <span>IMAP, POP3, EWS, Graph API, Gmail API, Zoho API, JMAP with protocol-level logging</span>
+                </div>
+                <div class="guide-feature">
+                  <strong>11-Point QC Verification</strong>
+                  <span>Collection completeness, hash integrity, duplicates, date consistency, DFIR compliance, and more</span>
+                </div>
+                <div class="guide-feature">
+                  <strong>RFC 3161 Timestamps</strong>
+                  <span>Cryptographic timestamps proving data integrity at collection and export time</span>
+                </div>
+                <div class="guide-feature">
+                  <strong>Cloud Attachment Detection</strong>
+                  <span>Detects Google Drive, OneDrive, SharePoint, Dropbox, and Box links in emails</span>
+                </div>
+                <div class="guide-feature">
+                  <strong>Inline Search Engine</strong>
+                  <span>Boolean, regex, wildcard, fuzzy, proximity, and field-specific search with date ranges</span>
+                </div>
+                <div class="guide-feature">
+                  <strong>Differential Collection</strong>
+                  <span>Incremental collection that skips previously acquired messages by hash/message-ID</span>
+                </div>
+              </div>
+            </section>
+
+            <section id="guide-getting-started" class="guide-section">
+              <h3>Getting Started</h3>
+              <ol class="guide-steps">
+                <li><strong>Create a Project</strong> &mdash; Click "+ New" and fill in case details, target email, and examiner information.</li>
+                <li><strong>Start a Collection</strong> &mdash; Go to "Collect" to launch the 9-step collection wizard.</li>
+                <li><strong>Review Results</strong> &mdash; Browse collected messages, view chain of custody, run forensic analysis.</li>
+                <li><strong>Export &amp; Verify</strong> &mdash; Export to EML/MBOX/MSG/PST/MIME with automatic RFC 3161 timestamps.</li>
+              </ol>
+              <div class="guide-callout">
+                <strong>App Password Required</strong>
+                <p>Most modern email providers require an app-specific password for IMAP/POP3 access. Enable 2FA on the target account and generate an app password in the provider's security settings.</p>
+              </div>
+            </section>
+
+            <section id="guide-protocols" class="guide-section">
+              <h3>Supported Protocols</h3>
+              <table class="guide-table">
+                <thead><tr><th>Protocol</th><th>Port</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td>IMAP</td><td>993/143</td><td>Full folder support, server-side search, UID tracking, read-only EXAMINE mode</td></tr>
+                  <tr><td>POP3</td><td>995/110</td><td>INBOX-only access, simple download, fallback protocol</td></tr>
+                  <tr><td>EWS</td><td>443</td><td>Exchange SOAP API with eDiscovery, autodiscover, recoverable items</td></tr>
+                  <tr><td>Graph API</td><td>443</td><td>Microsoft 365 REST API with OAuth 2.0, delta queries, modern attachments</td></tr>
+                  <tr><td>Gmail API</td><td>443</td><td>Google REST API with labels, history API, format=raw MIME content</td></tr>
+                  <tr><td>Zoho API</td><td>443</td><td>Zoho REST API with regional endpoints (US/EU/IN/AU/JP), OAuth 2.0</td></tr>
+                  <tr><td>JMAP</td><td>443</td><td>RFC 8621 open standard (Fastmail), batch method calls, state-based sync</td></tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section id="guide-collection" class="guide-section">
+              <h3>Running a Collection (9-Step Wizard)</h3>
+              <ol class="guide-steps">
+                <li><strong>Connect</strong> &mdash; Select protocol, enter credentials, test connection</li>
+                <li><strong>Workflow</strong> &mdash; Choose output formats, attachment options, save location</li>
+                <li><strong>Query</strong> &mdash; Optionally filter by date, sender, subject, keywords</li>
+                <li><strong>Folders</strong> &mdash; Select mail folders/labels to collect</li>
+                <li><strong>Preview</strong> &mdash; Review settings and estimated item count</li>
+                <li><strong>Collecting</strong> &mdash; Live progress with per-message hashing</li>
+                <li><strong>Results</strong> &mdash; View stats, errors, and collection log</li>
+                <li><strong>QC Verify</strong> &mdash; Run collection-focused quality control checks</li>
+                <li><strong>Transfer</strong> &mdash; Optionally copy collected data to external storage</li>
+              </ol>
+            </section>
+
+            <section id="guide-formats" class="guide-section">
+              <h3>Export Formats</h3>
+              <table class="guide-table">
+                <thead><tr><th>Format</th><th>Description</th><th>Best For</th></tr></thead>
+                <tbody>
+                  <tr><td>EML</td><td>Original MIME format, one file per message</td><td>Individual review, most platforms</td></tr>
+                  <tr><td>MBOX</td><td>RFC 4155 Unix mailbox, one file per folder</td><td>Batch processing, Unix tools</td></tr>
+                  <tr><td>MSG</td><td>Containerized message wrapping MIME source</td><td>Microsoft Outlook compatibility</td></tr>
+                  <tr><td>PST</td><td>Outlook data file (Unicode PST) with the collected folder tree, converted from the original MIME and split by size; pst_item_map.csv ties each item to its source hash</td><td>Review in Outlook or PST-based review tools</td></tr>
+                  <tr><td>MIME</td><td>Raw MIME source preservation</td><td>Maximum forensic integrity</td></tr>
+                  <tr><td>PDF Report</td><td>Printable HTML report with metadata and hashes</td><td>Court submissions, case documentation</td></tr>
+                  <tr><td>Concordance DAT</td><td>Load file with Bates numbering (SM-0000001)</td><td>eDiscovery platforms (Relativity, Concordance)</td></tr>
+                  <tr><td>XML</td><td>Structured XML with full metadata and CDATA body</td><td>Case management, XSLT, database imports</td></tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section id="guide-qc" class="guide-section">
+              <h3>Quality Control (11 Checks)</h3>
+              <ol class="guide-steps">
+                <li><strong>Collection Completeness</strong> &mdash; Verifies all acquisitions completed successfully</li>
+                <li><strong>Hash Integrity</strong> &mdash; Confirms SHA-256 hashes on all messages</li>
+                <li><strong>Duplicate Detection</strong> &mdash; Identifies messages with identical hashes</li>
+                <li><strong>Date Consistency</strong> &mdash; Checks for messages with missing or future dates</li>
+                <li><strong>Missing Fields</strong> &mdash; Scans for messages lacking required metadata</li>
+                <li><strong>Folder Coverage</strong> &mdash; Ensures all enumerated folders have messages</li>
+                <li><strong>Export Completeness</strong> &mdash; Verifies export record counts match</li>
+                <li><strong>Audit Trail</strong> &mdash; Validates hash-chained audit log integrity</li>
+                <li><strong>Encryption Detection</strong> &mdash; Flags encrypted/signed messages</li>
+                <li><strong>Write Protection (ISO 27037)</strong> &mdash; Verifies collection used read-only access (EXAMINE mode)</li>
+                <li><strong>DFIR Standards Compliance</strong> &mdash; Checks examiner, legal authority, case ID, hashing, acquisitions</li>
+              </ol>
+              <div class="guide-callout guide-callout-warn">
+                <strong>Forensic Integrity Notice</strong>
+                <p>SherlockMail never fabricates QC results. All verifications report honest results: PASS or ISSUES_FOUND with detailed diagnostics.</p>
+              </div>
+            </section>
+
+            <section id="guide-cloud" class="guide-section">
+              <h3>Cloud Attachment Detection</h3>
+              <p>SherlockMail detects cloud storage links embedded in email content:</p>
+              <ul>
+                <li>Google Drive (drive.google.com, docs.google.com)</li>
+                <li>Microsoft OneDrive (onedrive.live.com, 1drv.ms)</li>
+                <li>SharePoint (*.sharepoint.com)</li>
+                <li>Dropbox (dropbox.com, dl.dropboxusercontent.com)</li>
+                <li>Box (box.com, app.box.com)</li>
+              </ul>
+            </section>
+
+            <section id="guide-timestamps" class="guide-section">
+              <h3>RFC 3161 Timestamps</h3>
+              <p>Cryptographic timestamps provide tamper-evident proof that data existed at a specific time:</p>
+              <ul>
+                <li><strong>Collection timestamps</strong> &mdash; Generated after each acquisition</li>
+                <li><strong>Export timestamps</strong> &mdash; Generated after each export</li>
+                <li>Includes serial number, generation time, hash algorithm, and message digest</li>
+                <li>Conforms to RFC 3161 structure (Internet X.509 PKI Time-Stamp Protocol)</li>
+              </ul>
+              <div class="guide-callout guide-callout-warn">
+                <strong>Internal TSA Limitation</strong>
+                <p>SherlockMail uses an internal Timestamp Authority. These timestamps prove internal consistency but are not issued by an accredited QTSP (Qualified Trust Service Provider) per ETSI EN 319 421/422. For legally binding timestamps admissible in court, submit hash digests to a production TSA such as DigiCert, Sectigo, or GlobalSign.</p>
+              </div>
+            </section>
+
+            <section id="guide-search" class="guide-section">
+              <h3>Inline Search Engine</h3>
+              <table class="guide-table">
+                <thead><tr><th>Syntax</th><th>Example</th><th>Description</th></tr></thead>
+                <tbody>
+                  <tr><td>field:value</td><td>from:john@example.com</td><td>Search specific field</td></tr>
+                  <tr><td>"exact phrase"</td><td>subject:"quarterly report"</td><td>Exact phrase match</td></tr>
+                  <tr><td>AND / OR / NOT</td><td>from:john NOT subject:draft</td><td>Boolean operators</td></tr>
+                  <tr><td>[date TO date]</td><td>sent:[2024/01/01 TO 2024/06/30]</td><td>Date range</td></tr>
+                  <tr><td>* and ?</td><td>subject:contract*</td><td>Wildcards</td></tr>
+                  <tr><td>/pattern/</td><td>/invoice-\d{4}/</td><td>Regex search</td></tr>
+                  <tr><td>term~</td><td>recieve~</td><td>Fuzzy match</td></tr>
+                  <tr><td>"w1 w2"~N</td><td>"signed agreement"~5</td><td>Proximity search</td></tr>
+                </tbody>
+              </table>
+              <p>Available fields: from, to, cc, bcc, subject, messageid, sent, attachmentcount</p>
+            </section>
+
+            <section id="guide-custody" class="guide-section">
+              <h3>Chain of Custody</h3>
+              <ul>
+                <li>Each entry includes timestamp, event type, description, and examiner name</li>
+                <li>Each entry's hash = SHA-256(previousHash | timestamp | eventType | description)</li>
+                <li>The chain can be verified at any time &mdash; any modification breaks the chain</li>
+                <li>Events: project creation, acquisition, search, QC, export, cloud scan, timestamp, integrity verification</li>
+              </ul>
+            </section>
+
+            <section id="guide-integrity" class="guide-section">
+              <h3>Evidence Integrity Verification</h3>
+              <p>Comprehensive verification covering:</p>
+              <ul>
+                <li><strong>Message hash verification</strong> &mdash; SHA-256 integrity on all messages</li>
+                <li><strong>Audit chain verification</strong> &mdash; Hash-chain integrity on the audit log</li>
+                <li><strong>Export verification</strong> &mdash; File hash verification on exported files</li>
+                <li><strong>Timestamp records</strong> &mdash; Count and validity of RFC 3161 timestamps</li>
+              </ul>
+              <p>Standards: NIST FIPS 180-4, NIST SP 800-86, FRE 901(b)(9) / FRE 902(14), RFC 3161</p>
+            </section>
+
+            <section id="guide-security" class="guide-section">
+              <h3>Security &amp; Forensic Integrity</h3>
+              <ul>
+                <li>Credentials transmitted only to configured servers &mdash; never stored in plain text</li>
+                <li>TLS enabled by default for all connections</li>
+                <li>SQLite with WAL mode for crash-resistant writes</li>
+                <li>SHA-256 hashing on all messages at acquisition time</li>
+                <li>All exports preserve original MIME source data</li>
+                <li>QC verification provides honest, verifiable results</li>
+                <li>RFC 3161 timestamps for collection and export events</li>
+              </ul>
+            </section>
+
+            <section id="guide-standards" class="guide-section">
+              <h3>DFIR Standards Compliance</h3>
+              <p>SherlockMail is designed to align with established digital forensic and incident response (DFIR) standards and guidelines:</p>
+
+              <h4>ISO/IEC 27037:2012</h4>
+              <p><em>Guidelines for identification, collection, acquisition, and preservation of digital evidence.</em></p>
+              <ul>
+                <li><strong>Identification</strong> &mdash; Provider auto-detection and protocol enumeration identify available evidence sources</li>
+                <li><strong>Collection</strong> &mdash; IMAP EXAMINE mode ensures read-only access; all protocol interactions are logged</li>
+                <li><strong>Acquisition</strong> &mdash; SHA-256/SHA-512/MD5 triple hashing at acquisition time; per-message integrity verification</li>
+                <li><strong>Preservation</strong> &mdash; Hash-chained audit log, RFC 3161 timestamps, and tamper-evident chain of custody</li>
+                <li><strong>Four principles</strong> &mdash; Auditability (full audit trail), Repeatability (documented procedures), Reproducibility (hash verification), Justifiability (legal authority fields)</li>
+              </ul>
+
+              <h4>NIST SP 800-86</h4>
+              <p><em>Guide to Integrating Forensic Techniques into Incident Response.</em></p>
+              <ul>
+                <li><strong>Collection</strong> &mdash; 9-step wizard ensures systematic collection with documented parameters</li>
+                <li><strong>Examination</strong> &mdash; Inline search, header analysis, threading, and deduplication tools</li>
+                <li><strong>Analysis</strong> &mdash; Timeline visualization, relationship mapping, SPF/DKIM/DMARC authentication analysis</li>
+                <li><strong>Reporting</strong> &mdash; Chain of custody reports, PDF forensic reports, hash manifests</li>
+              </ul>
+
+              <h4>SWGDE Best Practices (2025)</h4>
+              <p><em>Scientific Working Group on Digital Evidence &mdash; Best Practices for Digital Evidence Collection (18-F-002-2.0).</em></p>
+              <ul>
+                <li><strong>Legal authority</strong> &mdash; Projects require legal authority and scope documentation before collection</li>
+                <li><strong>Documentation of changes</strong> &mdash; Any live collection that alters data is documented in the audit trail</li>
+                <li><strong>Ancillary data</strong> &mdash; Full email headers, metadata, cloud attachment links, and encryption status are preserved</li>
+                <li><strong>Targeted collection</strong> &mdash; Query filters, date ranges, and folder selection support defensible scope</li>
+                <li><strong>Cloud evidence</strong> &mdash; Per SWGDE 23-F-004-1.1, IMAP/API collection from cloud providers is documented as a viable option</li>
+              </ul>
+
+              <h4>ACPO Good Practice Guide (v5, 2012)</h4>
+              <p><em>Association of Chief Police Officers &mdash; Good Practice Guide for Digital Evidence.</em></p>
+              <ul>
+                <li><strong>Principle 1</strong> (No alteration) &mdash; IMAP EXAMINE mode prevents flag changes; BODY.PEEK[] avoids setting \Seen</li>
+                <li><strong>Principle 2</strong> (Competent access) &mdash; Examiner name recorded on all operations; justification fields available</li>
+                <li><strong>Principle 3</strong> (Audit trail) &mdash; SHA-256 hash-chained audit log records every action with timestamps</li>
+                <li><strong>Principle 4</strong> (Overall responsibility) &mdash; Examiner certification in chain of custody reports</li>
+              </ul>
+
+              <h4>EDRM (Electronic Discovery Reference Model)</h4>
+              <ul>
+                <li><strong>Collection Standards</strong> &mdash; Documented, repeatable collection processes with protocol logging</li>
+                <li><strong>Processing</strong> &mdash; Deduplication by SHA-256 hash and Message-ID, near-duplicate detection</li>
+                <li><strong>Production</strong> &mdash; Concordance DAT with Bates numbering (SM-0000001), OPT cross-reference files</li>
+              </ul>
+
+              <h4>Federal Rules of Evidence (FRE)</h4>
+              <ul>
+                <li><strong>FRE 901(b)(9)</strong> &mdash; Process producing accurate result: documented collection, hash verification, QC checks</li>
+                <li><strong>FRE 902(14)</strong> &mdash; Certified data from electronic process: hash manifests and chain of custody reports</li>
+              </ul>
+
+              <h4>Additional Standards</h4>
+              <table class="guide-table">
+                <thead><tr><th>Standard</th><th>Application</th></tr></thead>
+                <tbody>
+                  <tr><td>NIST FIPS 180-4</td><td>SHA-256/SHA-512 hash algorithms for evidence integrity</td></tr>
+                  <tr><td>RFC 3161</td><td>Trusted timestamping structure (use production TSA for legal binding)</td></tr>
+                  <tr><td>RFC 5322 / RFC 9051</td><td>Email message format / IMAP4rev2 protocol compliance</td></tr>
+                  <tr><td>RFC 8621</td><td>JMAP protocol for modern email access (Fastmail)</td></tr>
+                </tbody>
+              </table>
+
+              <div class="guide-callout guide-callout-warn">
+                <strong>Important Disclaimer</strong>
+                <p>SherlockMail generates RFC 3161-<em>structured</em> timestamps internally. For legally binding timestamps with evidentiary weight, connect to a qualified Timestamp Authority (TSA) such as DigiCert, Sectigo, or FreeTSA. Internal timestamps prove internal consistency but lack independent third-party attestation required by some jurisdictions and by ETSI EN 319 421/422.</p>
+              </div>
+              <div class="guide-callout">
+                <strong>Deviation Documentation</strong>
+                <p>Per SWGDE guidelines, if you encounter situations warranting deviation from standard collection practices, thoroughly document the specifics in the project notes and audit log. SherlockMail logs all protocol interactions and collection parameters automatically, but examiner notes on deviations should be added manually to the chain of custody.</p>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <!-- Stats Panel -->
+        <div id="view-stats" class="panel-view">
+          <h2>Project Overview</h2>
+          <div id="stats-content"></div>
+        </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Status Bar -->
+    <div class="status-bar">
+      <div class="status-item">
+        <div class="status-dot"></div>
+        <span>SherlockMail v0.9.0</span>
+      </div>
+      <div class="status-item" id="status-projects">Projects: 0</div>
+      <div class="status-item" id="status-messages">Messages: 0</div>
+      <div class="status-item" id="status-size">Size: 0 B</div>
+      <button type="button" class="status-item status-collection" id="status-collection" style="display:none" onclick="openActiveCollection()" title="Show the running collection"></button>
+      <div class="status-item" style="margin-left:auto" id="status-node"></div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

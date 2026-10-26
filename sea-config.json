@@ -1,6 +1,0 @@
-{
-  "main": "dist/sherlock-mail.cjs",
-  "output": "dist/sea-prep.blob",
-  "disableExperimentalSEAWarning": true,
-  "useCodeCache": true
-}
