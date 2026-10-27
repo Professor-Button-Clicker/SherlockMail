@@ -5,6 +5,7 @@ import { getOAuth2Client, getAuthStatus } from '../services/google-oauth.js';
 
 const ALL_MAIL_NAME = 'All Mail';
 const ALL_MAIL_ID = 'ALL_MAIL';
+const GOOGLE_API_ROOT = process.env.SHERLOCKMAIL_GOOGLE_API_URL || undefined;
 
 export class GmailHandler {
   constructor(config) {
@@ -30,8 +31,10 @@ export class GmailHandler {
     }
 
     const auth = getOAuth2Client();
-    // Without a timeout a blocked or proxied network leaves requests hanging forever.
-    this.gmail = google.gmail({ version: 'v1', auth, timeout: 60000 });
+    // Without a timeout a blocked or proxied network leaves requests hanging forever. The client's own
+    // retries are off: it would re-send refused requests at once, outside the collection's pacing,
+    // and every refused request still counts against the Gmail quota.
+    this.gmail = google.gmail({ version: 'v1', auth, timeout: 60000, retry: false, ...(GOOGLE_API_ROOT ? { rootUrl: GOOGLE_API_ROOT } : {}) });
 
     this.log('CLIENT', 'Connecting to Gmail API via OAuth2');
     this.log('C→S', 'GET https://gmail.googleapis.com/gmail/v1/users/me/profile');
@@ -166,7 +169,10 @@ export class GmailHandler {
       const status = err.response?.status || err.code;
       const reason = err.errors?.[0]?.reason || '';
       if (status === 429 || (status === 403 && /rateLimitExceeded|userRateLimitExceeded/.test(reason))) {
-        const ra = parseFloat(err.response?.headers?.['retry-after']);
+        // A quota refusal: the collection pauses every request and tries again, it is not a failure.
+        err.throttled = true;
+        const headers = err.response?.headers;
+        const ra = parseFloat(typeof headers?.get === 'function' ? headers.get('retry-after') : headers?.['retry-after']);
         if (!isNaN(ra)) err.retryAfterMs = ra * 1000;
       } else if (status === 400 || status === 404) {
         err.permanent = true;

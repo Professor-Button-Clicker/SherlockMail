@@ -3,13 +3,14 @@ import { simpleParser } from 'mailparser';
 import { v4 as uuidv4 } from 'uuid';
 
 // Per-protocol throughput settings. Limits follow each provider's documented ceilings:
-// Graph allows 4 concurrent requests per mailbox, Gmail 250 quota units/s (messages.get = 5),
+// Graph allows 4 concurrent requests per mailbox; Gmail allows 15,000 quota units per user per minute
+// (messages.get = 5, so at most 50 messages/s) and starts at half that, slowing further if refused;
 // EWS GetItem is batched like FEC's BindToItems, IMAP uses parallel sessions with range FETCH.
 // batchBytes caps a batch by server-reported size so one connection never vanishes into a huge batch.
 export const COLLECTION_PROFILES = {
   imap:      { workers: 4, perWorkerConnection: true, batchSize: 50, batchBytes: 4 * 1024 * 1024 },
   pop3:      { workers: 1, perWorkerConnection: false, batchSize: 10, batchBytes: 4 * 1024 * 1024 },
-  gmail_api: { workers: 10, perWorkerConnection: false, batchSize: 1, ratePerSec: 40 },
+  gmail_api: { workers: 8, perWorkerConnection: false, batchSize: 1, ratePerSec: 25 },
   graph:     { workers: 4, perWorkerConnection: false, batchSize: 1 },
   ews:       { workers: 4, perWorkerConnection: false, batchSize: 20, batchBytes: 8 * 1024 * 1024 },
 };
@@ -41,6 +42,12 @@ const MAX_RETRY_AFTER_MS = 120000;
 // Items that still fail after their own retries get one more attempt once the rest of the mailbox is
 // done, after a pause: throttling and dropped sessions usually clear by then.
 const FINAL_RETRY_DELAY_MS = 5000;
+// When a provider refuses a request for its rate quota, every worker pauses for one quota window (Gmail
+// counts per minute) unless the provider says how long to wait. Waiting for quota is not a failed
+// attempt; items fail only once the provider has refused every request for THROTTLE_GIVE_UP_MS.
+const THROTTLE_PAUSE_MS = Number(process.env.SHERLOCKMAIL_THROTTLE_PAUSE_MS) || 60000;
+const THROTTLE_GIVE_UP_MS = Number(process.env.SHERLOCKMAIL_THROTTLE_GIVE_UP_MS) || 15 * 60000;
+const MIN_RATE_PER_SEC = 2;
 
 function abortableSleep(ms, signal) {
   if (!signal) return sleep(ms);
@@ -52,13 +59,19 @@ function abortableSleep(ms, signal) {
   });
 }
 
-export async function withRetry(fn, { attempts = 4, baseMs = 500, maxMs = 30000, onRetry } = {}) {
+// onThrottle(err) handles errors marked `throttled` (a provider's rate quota): it waits out the quota and
+// returns true to try again without using up an attempt, or false to give up.
+export async function withRetry(fn, { attempts = 4, baseMs = 500, maxMs = 30000, onRetry, onThrottle, signal } = {}) {
   let lastErr;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       return await fn(attempt);
     } catch (err) {
       lastErr = err;
+      if (err.throttled && onThrottle && !signal?.aborted) {
+        if (await onThrottle(err)) { attempt--; continue; }
+        break;
+      }
       if (err.permanent || attempt === attempts) break;
       const backoff = Math.min(maxMs, baseMs * 2 ** (attempt - 1));
       const delay = err.retryAfterMs != null
@@ -71,18 +84,95 @@ export async function withRetry(fn, { attempts = 4, baseMs = 500, maxMs = 30000,
   throw lastErr;
 }
 
-class RateLimiter {
-  constructor(perSec) {
-    this.interval = 1000 / perSec;
+// Paces requests for all workers together (perSec 0: no pacing) and waits out provider quotas. A quota
+// refusal pauses every worker and halves the rate; the rate then creeps back up while requests succeed.
+class Pacer {
+  constructor(perSec = 0) {
+    this.maxPerSec = perSec;
+    this.perSec = perSec;
     this.nextSlot = 0;
+    this.pausedUntil = 0;
+    this.refusedSince = null; // first refusal since the last successful request
+    this.successes = 0;
   }
 
-  async take() {
-    const now = Date.now();
-    const slot = Math.max(now, this.nextSlot);
-    this.nextSlot = slot + this.interval;
-    if (slot > now) await sleep(slot - now);
+  async take(signal) {
+    for (;;) {
+      if (signal?.aborted) return;
+      const now = Date.now();
+      if (now < this.pausedUntil) {
+        await abortableSleep(this.pausedUntil - now, signal);
+        continue;
+      }
+      if (!this.perSec) return;
+      const slot = Math.max(now, this.nextSlot);
+      this.nextSlot = slot + 1000 / this.perSec;
+      if (slot > now) await abortableSleep(slot - now, signal);
+      // A pause that began while this worker waited for its slot applies to it too.
+      if (Date.now() >= this.pausedUntil) return;
+    }
   }
+
+  async waitForPause(signal) {
+    const ms = this.pausedUntil - Date.now();
+    if (ms > 0) await abortableSleep(ms, signal);
+  }
+
+  succeeded() {
+    this.refusedSince = null;
+    if (!this.perSec || this.perSec >= this.maxPerSec) return;
+    // Additive increase: one request/s more after about 30 s without a refusal.
+    if (++this.successes >= this.perSec * 30) {
+      this.perSec = Math.min(this.maxPerSec, this.perSec + 1);
+      this.successes = 0;
+    }
+  }
+
+  // Returns the new pause, or null when already pausing: requests that were in flight when the first
+  // refusal arrived are refused too and must not halve the rate again.
+  refused(pauseMs) {
+    const now = Date.now();
+    this.refusedSince ??= now;
+    if (now < this.pausedUntil) return null;
+    if (this.perSec) this.perSec = Math.max(Math.min(MIN_RATE_PER_SEC, this.maxPerSec), this.perSec / 2);
+    this.pausedUntil = now + pauseMs;
+    this.successes = 0;
+    return { pauseMs, perSec: this.perSec };
+  }
+
+  exhausted() {
+    return this.refusedSince != null && Date.now() - this.refusedSince >= THROTTLE_GIVE_UP_MS;
+  }
+}
+
+const formatRate = perSec => (Number.isInteger(perSec) ? String(perSec) : perSec.toFixed(1));
+
+function quotaGiveUpError(err) {
+  const minutes = Math.round(THROTTLE_GIVE_UP_MS / 60000);
+  const waited = minutes >= 1 ? `${minutes} min` : `${Math.round(THROTTLE_GIVE_UP_MS / 1000)} s`;
+  const e = new Error(`${err?.message || 'Rate quota exceeded'} (the server refused every request for ${waited}; not collected)`);
+  e.permanent = true;
+  return e;
+}
+
+// Shared handling of a quota refusal: pause everyone, report it once per pause, and wait. Returns false
+// once the provider has refused everything for THROTTLE_GIVE_UP_MS.
+async function waitOutQuota(pacer, err, { signal, progress, onThrottle }) {
+  const pauseMs = err.retryAfterMs != null ? Math.min(Math.max(err.retryAfterMs, 1000), MAX_RETRY_AFTER_MS) : THROTTLE_PAUSE_MS;
+  pacer.lastRefusal = err;
+  const pause = pacer.refused(pauseMs);
+  if (pacer.exhausted()) return false;
+  if (pause && progress) {
+    const detail = `Quota reached: pausing all requests for ${Math.round(pauseMs / 1000)} s`
+      + (pause.perSec ? `, then continuing at ${formatRate(pause.perSec)} requests/s` : '');
+    progress.throttlePauses = (progress.throttlePauses || 0) + 1;
+    progress.quotaPausedUntil = pacer.pausedUntil;
+    progress.statusDetail = detail;
+    onThrottle?.({ message: err.message, pauseMs, perSec: pause.perSec, detail });
+  }
+  await pacer.waitForPause(signal);
+  if (progress && progress.statusDetail?.startsWith('Quota reached') && Date.now() >= pacer.pausedUntil) progress.statusDetail = '';
+  return !signal?.aborted;
 }
 
 const PARSER_OPTIONS = { skipHtmlToText: true, skipTextToHtml: true, skipTextLinks: true, skipImageLinks: true };
@@ -186,7 +276,12 @@ function startRateTracker(progress, onTick) {
       bytes: progress.bytesDone || 0,
     };
     progress.elapsedMs = now - progress.startedAt;
-    if (progress.phase === 'collecting') {
+    if (progress.quotaPausedUntil > now) {
+      // Waiting for a provider quota: no meaningful rate or time remaining, and the pause must not drag
+      // down the rate measured once requests resume.
+      progress.itemsPerSec = 0;
+      progress.estimateMs = progress.estimateItemsMs = progress.estimatedFinishAt = null;
+    } else if (progress.phase === 'collecting') {
       if (!start) {
         start = cur;
       } else {
@@ -287,7 +382,7 @@ function assignWeights(refs, progress) {
  * Lists every selected folder (with any server-side criteria) and merges Gmail label copies, without
  * downloading anything. Used by the collection itself and by the pre-collection estimate.
  */
-export async function enumerateFolders({ primary, folders, limit = 0, searchCriteria, progress, signal, onFolderError }) {
+export async function enumerateFolders({ primary, folders, limit = 0, searchCriteria, progress, signal, onFolderError, pacer = new Pacer(), onThrottle }) {
   const listings = [];
   const folderErrors = [];
   for (const [index, folder] of folders.entries()) {
@@ -300,10 +395,14 @@ export async function enumerateFolders({ primary, folders, limit = 0, searchCrit
       progress.statusDetail = `Listing ${folder} (folder ${index + 1} of ${folders.length})`;
     }
     try {
-      const { key, refs } = await withRetry(() => primary.enumerate(folder, { limit, searchCriteria }), { attempts: 3 });
+      const { key, refs } = await withRetry(() => primary.enumerate(folder, { limit, searchCriteria }), {
+        attempts: 3, signal, onThrottle: err => waitOutQuota(pacer, err, { signal, progress, onThrottle }),
+      });
+      pacer.succeeded();
       listings.push({ folder, key, refs });
       if (progress) progress.total += refs.length;
-    } catch (err) {
+    } catch (caught) {
+      const err = caught.throttled && pacer.exhausted() ? quotaGiveUpError(caught) : caught;
       folderErrors.push({ folder, error: err });
       onFolderError?.(folder, err);
     }
@@ -320,20 +419,23 @@ export async function enumerateFolders({ primary, folders, limit = 0, searchCrit
  */
 export async function runCollection({
   protocol, primary, folders, limit = 0, searchCriteria, progress,
-  onRecord, onFailure, onFolderError, onTick, overrides = {}, signal,
+  onRecord, onFailure, onFolderError, onTick, onThrottle, onDeferred, overrides = {}, signal,
 }) {
   const profile = { ...COLLECTION_PROFILES[protocol] };
   if (overrides.workers > 0) profile.workers = Math.min(overrides.workers, 16);
   const stopTracker = startRateTracker(progress, onTick);
   const extraHandlers = [];
   progress.bytesDone = progress.bytesDone || 0;
+  progress.deferred = 0;
+  const pacer = new Pacer(profile.ratePerSec || 0);
+  const throttle = err => waitOutQuota(pacer, err, { signal, progress, onThrottle });
 
   try {
     progress.phase = 'enumerating';
     const queue = [];
     const folderTotals = {};
     const { listings, duplicatesMerged, folderErrors } = await enumerateFolders({
-      primary, folders, limit, searchCriteria, progress, signal, onFolderError,
+      primary, folders, limit, searchCriteria, progress, signal, onFolderError, pacer, onThrottle,
     });
     for (const { folder } of folderErrors) folderTotals[folder] = 0;
     progress.duplicatesMerged = duplicatesMerged;
@@ -378,8 +480,6 @@ export async function runCollection({
     progress.workers = workerHandlers.length;
     progress.phase = 'collecting';
 
-    const limiter = profile.ratePerSec ? new RateLimiter(profile.ratePerSec) : null;
-
     const processItem = async (job, item) => {
       progress.bytesDone += item.raw.length;
       try {
@@ -410,32 +510,43 @@ export async function runCollection({
       };
       let fetchError = null;
       try {
+        // Once the provider has refused everything for the give-up period, stop asking.
+        if (pacer.exhausted()) throw quotaGiveUpError(pacer.lastRefusal);
         await withRetry(async () => {
           const remaining = job.refs.filter(r => !delivered.has(r.key));
           if (!remaining.length) return;
-          if (limiter) await limiter.take();
+          await pacer.take(signal);
+          if (signal?.aborted) return;
           if (handler.ensureConnected) await handler.ensureConnected();
           await handler.fetchBatch(job.key, remaining, deliver);
+          pacer.succeeded();
           if (job.refs.length === 1 && !delivered.size) throw new Error('Server returned no content for item');
         }, {
           attempts: job.refs.length > 1 ? 2 : 4,
+          signal,
+          onThrottle: throttle,
           onRetry: (err) => {
             progress.retrying = true;
             progress.retryItem = `${job.folder} (${job.refs.length - delivered.size} item${job.refs.length - delivered.size === 1 ? '' : 's'}): ${err.message}`;
           },
         });
       } catch (err) {
-        fetchError = err;
+        fetchError = err.throttled && pacer.exhausted() ? quotaGiveUpError(err) : err;
       } finally {
         progress.retrying = false;
       }
       await Promise.all(processing);
+      // Stopped by the examiner: items not delivered are reported as not collected, not as failed.
+      if (signal?.aborted) return;
 
       for (const ref of job.refs.filter(r => !delivered.has(r.key))) {
         if (job.refs.length > 1) {
           queue.push({ ...job, refs: [ref] });
         } else {
-          deferred.push({ job, ref, error: fetchError || new Error('Server returned no content for item') });
+          const error = fetchError || new Error('Server returned no content for item');
+          deferred.push({ job, ref, error });
+          progress.deferred++;
+          onDeferred?.({ folder: job.folder, ref, error });
         }
       }
     };
@@ -459,21 +570,28 @@ export async function runCollection({
       const retryHandler = handlers[0];
       for (const [i, d] of deferred.entries()) {
         if (signal?.aborted) break;
+        if (pacer.exhausted()) {
+          d.error = d.error?.permanent ? d.error : quotaGiveUpError(pacer.lastRefusal);
+          continue;
+        }
         progress.retryItem = `${d.job.folder} #${d.ref.uid ?? '?'} (${i + 1} of ${deferred.length})`;
         let item = null;
         try {
           await withRetry(async () => {
-            if (limiter) await limiter.take();
+            await pacer.take(signal);
+            if (signal?.aborted) return;
             if (retryHandler.ensureConnected) await retryHandler.ensureConnected();
             await retryHandler.fetchBatch(d.job.key, [d.ref], it => { if (it?.raw) item = it; });
+            pacer.succeeded();
             if (!item) throw new Error('Server returned no content for item');
-          }, { attempts: 2 });
+          }, { attempts: 2, signal, onThrottle: throttle });
         } catch (err) {
-          d.error = err;
+          d.error = err.throttled && pacer.exhausted() ? quotaGiveUpError(err) : err;
         }
         if (item) {
           recovered++;
           d.done = true;
+          progress.deferred--;
           await processItem(d.job, item);
         }
       }
@@ -486,6 +604,7 @@ export async function runCollection({
       onFailure({ folder: d.job.folder, key: d.job.key, ref: d.ref, error: d.error, stage: 'fetch' });
       settle(d.ref);
     }
+    progress.deferred = 0;
     progress.recoveredOnRetry = recovered;
     return { folderTotals, connections: handlers.length, recovered, canceled: !!signal?.aborted };
   } finally {

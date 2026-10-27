@@ -1366,7 +1366,7 @@ async function runCollectionJob(ctx) {
         if (state !== lastLogged) { live.write(`Phase: ${state}`); lastLogged = state; }
         if (Date.now() - lastHeartbeat >= 15000) {
           lastHeartbeat = Date.now();
-          live.write(`Progress: ${done}/${progress.total} (acquired ${progress.acquired}, failed ${progress.failed}, skipped ${progress.skipped}), ${progress.itemsPerSec || 0} items/s, ETA ${progress.estimateMs != null ? Math.round(progress.estimateMs / 1000) + 's' : 'n/a'}`);
+          live.write(`Progress: ${done}/${progress.total} (acquired ${progress.acquired}, failed ${progress.failed}, skipped ${progress.skipped}${progress.deferred ? `, ${progress.deferred} set aside for a final retry` : ''}), ${progress.itemsPerSec || 0} items/s, ETA ${progress.estimateMs != null ? Math.round(progress.estimateMs / 1000) + 's' : 'n/a'}`);
         }
       };
       const itemEvent = (status, folder, fields) => publishCollectEvent(project.id, {
@@ -1410,6 +1410,13 @@ async function runCollectionJob(ctx) {
             pushProgressError(`${folder}: ${err.message}`);
             progress.lastError = `${folder}: ${err.message}`;
             live.write(`Folder failed: ${folder}: ${err.message}`);
+          },
+          onThrottle: ({ message, detail }) => {
+            live.write(`${detail} (server: ${message})`);
+            publish();
+          },
+          onDeferred: ({ folder, ref, error }) => {
+            live.write(`Item set aside for a final retry: ${folder} #${ref?.uid ?? '?'}: ${error.message}`);
           },
           onTick: () => {
             logTick();
