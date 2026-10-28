@@ -10,7 +10,7 @@ SherlockMail is a standalone desktop application that collects, preserves, and e
 
 ### Windows Installer (Recommended)
 
-1. Download **SherlockMail-Setup-0.9.0.exe** from the [latest release](../../releases/latest)
+1. Download **SherlockMail.Setup.0.9.0.exe** from the [latest release](../../releases/latest)
 2. Run the installer — it handles everything automatically
 3. Launch SherlockMail from the Start Menu or desktop shortcut
 
@@ -141,7 +141,7 @@ Each provider has multiple collection profiles ranked by priority. If the primar
 | **POP3** | Inbox-only access. Fallback protocol. Ports 995 (TLS) / 110. |
 | **EWS** | Exchange Web Services over SOAP/HTTPS. Autodiscover, KQL mailbox search, paginated FindItem, Recoverable Items access. |
 | **Microsoft Graph API** | REST API for Microsoft 365 / Exchange Online. OAuth 2.0, paginated message download, MIME export via `$value`. |
-| **Gmail API** | Google REST API. OAuth 2.0, label-based collection, raw MIME download (`format=raw`). |
+| **Gmail API** | Google REST API. OAuth 2.0, label-based collection, raw MIME download (`format=raw`). When Google refuses requests for its per-minute quota, every download pauses for one quota window (60 s, or the server's Retry-After) and resumes at a slower pace; a message fails only after 15 minutes of refusals. |
 | **Zoho Mail API** | Zoho REST API with automatic regional endpoint detection (US/EU/IN/AU/JP). |
 | **JMAP** | RFC 8621 JSON protocol. Batch method calls, state-based sync. Used by Fastmail. |
 
@@ -152,8 +152,8 @@ SherlockMail includes built-in OAuth flows for three providers. Each uses a loca
 | Provider | Callback Port | Scopes |
 |----------|--------------|--------|
 | Google | `localhost:3847` | `gmail.readonly`, `drive.readonly` |
-| Microsoft | `localhost:3848` | `Mail.Read`, `Files.Read`, `offline_access` |
-| Zoho | `localhost:3849` | `ZohoMail.messages.READ` |
+| Microsoft | `localhost:3848` | `Mail.Read`, `Files.Read`, `Files.Read.All`, `offline_access` |
+| Zoho | `localhost:3849` | `ZohoMail.messages.READ`, `ZohoMail.folders.READ`, `ZohoMail.accounts.READ`, `ZohoMail.attachments.READ` |
 
 Place your OAuth credentials in the `data/` directory:
 - **Google**: `data/google-credentials.json` (download from Google Cloud Console, "Desktop app" type)
