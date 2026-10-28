@@ -141,7 +141,7 @@ Each provider has multiple collection profiles ranked by priority. If the primar
 | **POP3** | Inbox-only access. Fallback protocol. Ports 995 (TLS) / 110. |
 | **EWS** | Exchange Web Services over SOAP/HTTPS. Autodiscover, KQL mailbox search, paginated FindItem, Recoverable Items access. |
 | **Microsoft Graph API** | REST API for Microsoft 365 / Exchange Online. OAuth 2.0, paginated message download, MIME export via `$value`. |
-| **Gmail API** | Google REST API. OAuth 2.0, label-based collection, raw MIME download (`format=raw`). When Google refuses requests for its per-minute quota, every download pauses for one quota window (60 s, or the server's Retry-After) and resumes at a slower pace; a message fails only after 15 minutes of refusals. |
+| **Gmail API** | Google REST API. OAuth 2.0, label-based collection, raw MIME download (`format=raw`). When Google refuses requests for its per-minute quota, every download pauses for one quota window (60 s, or the server's Retry-After) and resumes at a slower pace. Messages that still fail are tried again after the rest of the mailbox, up to 50 more times each (a message the server reports as gone is not retried). |
 | **Zoho Mail API** | Zoho REST API with automatic regional endpoint detection (US/EU/IN/AU/JP). |
 | **JMAP** | RFC 8621 JSON protocol. Batch method calls, state-based sync. Used by Fastmail. |
 

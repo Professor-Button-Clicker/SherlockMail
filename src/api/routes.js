@@ -1418,12 +1418,16 @@ async function runCollectionJob(ctx) {
           onDeferred: ({ folder, ref, error }) => {
             live.write(`Item set aside for a final retry: ${folder} #${ref?.uid ?? '?'}: ${error.message}`);
           },
+          onRetryRound: ({ round, of, count }) => {
+            live.write(`Final retries, round ${round} of ${of}: ${count} item(s) still to collect`);
+            publish();
+          },
           onTick: () => {
             logTick();
             publish();
           },
         });
-        if (run.recovered) live.write(`Final retry pass recovered ${run.recovered} item(s)`);
+        if (run.retryRounds) live.write(`Final retries recovered ${run.recovered} item(s) in ${run.retryRounds} round(s)`);
       } finally {
         sink.flush();
       }

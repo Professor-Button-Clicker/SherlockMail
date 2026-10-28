@@ -39,9 +39,11 @@ export function supportsEngine(protocol) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const EXTRA_CONNECTION_WAIT_MS = 20000;
 const MAX_RETRY_AFTER_MS = 120000;
-// Items that still fail after their own retries get one more attempt once the rest of the mailbox is
-// done, after a pause: throttling and dropped sessions usually clear by then.
-const FINAL_RETRY_DELAY_MS = 5000;
+// Items that still fail after their own retries are tried again once the rest of the mailbox is done, in
+// up to FINAL_RETRY_ROUNDS rounds. Each round tries every remaining item once after a short pause, so a
+// quota or a dropped session has time to clear between tries.
+const FINAL_RETRY_ROUNDS = 50;
+const FINAL_RETRY_DELAY_MS = Number(process.env.SHERLOCKMAIL_FINAL_RETRY_DELAY_MS) || 5000;
 // When a provider refuses a request for its rate quota, every worker pauses for one quota window (Gmail
 // counts per minute) unless the provider says how long to wait. Waiting for quota is not a failed
 // attempt; items fail only once the provider has refused every request for THROTTLE_GIVE_UP_MS.
@@ -151,7 +153,13 @@ function quotaGiveUpError(err) {
   const minutes = Math.round(THROTTLE_GIVE_UP_MS / 60000);
   const waited = minutes >= 1 ? `${minutes} min` : `${Math.round(THROTTLE_GIVE_UP_MS / 1000)} s`;
   const e = new Error(`${err?.message || 'Rate quota exceeded'} (the server refused every request for ${waited}; not collected)`);
-  e.permanent = true;
+  e.quotaGiveUp = true;
+  return e;
+}
+
+function withNote(err, note) {
+  const e = new Error(`${err?.message || 'Failed'} (${note})`);
+  e.cause = err;
   return e;
 }
 
@@ -419,7 +427,7 @@ export async function enumerateFolders({ primary, folders, limit = 0, searchCrit
  */
 export async function runCollection({
   protocol, primary, folders, limit = 0, searchCriteria, progress,
-  onRecord, onFailure, onFolderError, onTick, onThrottle, onDeferred, overrides = {}, signal,
+  onRecord, onFailure, onFolderError, onTick, onThrottle, onDeferred, onRetryRound, overrides = {}, signal,
 }) {
   const profile = { ...COLLECTION_PROFILES[protocol] };
   if (overrides.workers > 0) profile.workers = Math.min(overrides.workers, 16);
@@ -562,38 +570,48 @@ export async function runCollection({
     await Promise.all(workerHandlers.map(worker));
 
     let recovered = 0;
-    if (deferred.length && !signal?.aborted) {
+    let rounds = 0;
+    // An error retrying cannot change (the message no longer exists, a malformed request) is not retried.
+    let pending = deferred.filter(d => !d.error?.permanent);
+    if (pending.length && !signal?.aborted) {
       progress.phase = 'retrying_failed';
       progress.retrying = true;
-      progress.statusDetail = `Retrying ${deferred.length} item(s) that failed`;
-      await abortableSleep(FINAL_RETRY_DELAY_MS, signal);
-      const retryHandler = handlers[0];
-      for (const [i, d] of deferred.entries()) {
-        if (signal?.aborted) break;
-        if (pacer.exhausted()) {
-          d.error = d.error?.permanent ? d.error : quotaGiveUpError(pacer.lastRefusal);
-          continue;
-        }
-        progress.retryItem = `${d.job.folder} #${d.ref.uid ?? '?'} (${i + 1} of ${deferred.length})`;
-        let item = null;
-        try {
-          await withRetry(async () => {
-            await pacer.take(signal);
-            if (signal?.aborted) return;
-            if (retryHandler.ensureConnected) await retryHandler.ensureConnected();
-            await retryHandler.fetchBatch(d.job.key, [d.ref], it => { if (it?.raw) item = it; });
-            pacer.succeeded();
-            if (!item) throw new Error('Server returned no content for item');
-          }, { attempts: 2, signal, onThrottle: throttle });
-        } catch (err) {
-          d.error = err.throttled && pacer.exhausted() ? quotaGiveUpError(err) : err;
-        }
-        if (item) {
-          recovered++;
-          d.done = true;
-          progress.deferred--;
-          await processItem(d.job, item);
-        }
+      // The final rounds get their own give-up period if the quota still refuses everything.
+      pacer.refusedSince = null;
+      while (pending.length && rounds < FINAL_RETRY_ROUNDS && !signal?.aborted && !pacer.exhausted()) {
+        rounds++;
+        progress.statusDetail = `Final retries: round ${rounds} of ${FINAL_RETRY_ROUNDS}, ${pending.length} item(s)`;
+        onRetryRound?.({ round: rounds, of: FINAL_RETRY_ROUNDS, count: pending.length });
+        await abortableSleep(FINAL_RETRY_DELAY_MS, signal);
+        const roundQueue = pending.slice();
+        let tried = 0;
+        const retryWorker = async (handler) => {
+          for (let d = roundQueue.shift(); d; d = roundQueue.shift()) {
+            if (signal?.aborted || pacer.exhausted()) return;
+            progress.retryItem = `${d.job.folder} #${d.ref.uid ?? '?'} (round ${rounds}, ${++tried} of ${pending.length})`;
+            let item = null;
+            try {
+              await pacer.take(signal);
+              if (signal?.aborted) return;
+              d.tries = (d.tries || 0) + 1;
+              if (handler.ensureConnected) await handler.ensureConnected();
+              await handler.fetchBatch(d.job.key, [d.ref], it => { if (it?.raw) item = it; });
+              pacer.succeeded();
+              if (!item) throw new Error('Server returned no content for item');
+            } catch (err) {
+              // One try per round, quota refusals included; a refusal still pauses every worker.
+              d.error = err;
+              if (err.throttled) await waitOutQuota(pacer, err, { signal, progress, onThrottle });
+              continue;
+            }
+            recovered++;
+            d.done = true;
+            progress.deferred--;
+            await processItem(d.job, item);
+          }
+        };
+        await Promise.all(workerHandlers.map(retryWorker));
+        pending = pending.filter(d => !d.done && !d.error?.permanent);
       }
       progress.retrying = false;
       progress.retryItem = '';
@@ -601,12 +619,16 @@ export async function runCollection({
     }
     for (const d of deferred) {
       if (d.done) continue;
-      onFailure({ folder: d.job.folder, key: d.job.key, ref: d.ref, error: d.error, stage: 'fetch' });
+      let error = d.error;
+      if (error?.permanent) error = withNote(error, 'not retried: the server will give the same answer');
+      else if (error?.throttled && pacer.exhausted()) error = quotaGiveUpError(error);
+      else if (d.tries) error = withNote(error, `still failing after ${d.tries} final ${d.tries === 1 ? 'retry' : 'retries'}`);
+      onFailure({ folder: d.job.folder, key: d.job.key, ref: d.ref, error, stage: 'fetch' });
       settle(d.ref);
     }
     progress.deferred = 0;
     progress.recoveredOnRetry = recovered;
-    return { folderTotals, connections: handlers.length, recovered, canceled: !!signal?.aborted };
+    return { folderTotals, connections: handlers.length, recovered, retryRounds: rounds, canceled: !!signal?.aborted };
   } finally {
     stopTracker();
     await Promise.allSettled(extraHandlers.map(h => h.disconnect()));

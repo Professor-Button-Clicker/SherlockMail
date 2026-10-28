@@ -167,8 +167,13 @@ export class GmailHandler {
       return await fn();
     } catch (err) {
       const status = err.response?.status || err.code;
-      const reason = err.errors?.[0]?.reason || '';
-      if (status === 429 || (status === 403 && /rateLimitExceeded|userRateLimitExceeded/.test(reason))) {
+      // The client puts Google's error reasons in the response body, not on the error itself.
+      const reason = err.errors?.[0]?.reason || err.response?.data?.error?.errors?.[0]?.reason || '';
+      // Gmail refuses a per-user rate quota with 429, or with 403 "rateLimitExceeded" and "Quota exceeded
+      // for quota metric ... per minute per user".
+      const rateQuota = /^(rateLimitExceeded|userRateLimitExceeded)$/.test(reason)
+        || /Quota exceeded for quota metric .* per (minute|second)/i.test(err.message || '');
+      if (status === 429 || (status === 403 && rateQuota)) {
         // A quota refusal: the collection pauses every request and tries again, it is not a failure.
         err.throttled = true;
         const headers = err.response?.headers;
