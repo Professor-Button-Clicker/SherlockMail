@@ -7,7 +7,8 @@ import crypto from 'crypto';
 import { createAuthWaiters } from './auth-waiters.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_DIR = path.join(__dirname, '..', '..', 'data');
+// The app's data folder (the user's profile in the installed app), like the Google and Microsoft sign-ins.
+const CONFIG_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
 const TOKENS_PATH = path.join(CONFIG_DIR, 'zoho-tokens.json');
 const CREDENTIALS_PATH = path.join(CONFIG_DIR, 'zoho-credentials.json');
 
@@ -63,6 +64,7 @@ function getAuthBase(region) {
 }
 
 export function getApiBase(region) {
+  if (process.env.SHERLOCKMAIL_ZOHO_API_URL) return process.env.SHERLOCKMAIL_ZOHO_API_URL; // local stand-in, for tests
   const regions = {
     us: 'https://mail.zoho.com',
     eu: 'https://mail.zoho.eu',

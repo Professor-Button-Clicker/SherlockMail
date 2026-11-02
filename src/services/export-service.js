@@ -3,7 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
-import { exportMessagesToPst, itemMapCsv } from './pst/pst-export.js';
+import { exportMessagesToPst, itemMapCsv, itemMeta } from './pst/pst-export.js';
+import { mimeToMsg } from './msg/msg-writer.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
@@ -26,10 +27,10 @@ export class ExportService {
         name: 'MSG (Outlook)',
         extension: '.msg',
         mimeType: 'application/vnd.ms-outlook',
-        description: 'Microsoft Outlook message format. Binary format based on OLE/COM structured storage (CFB). Contains message properties, body in RTF/HTML/plain, and embedded attachments.',
+        description: 'Microsoft Outlook message (MS-OXMSG, Unicode). One file per message, converted from its original collected MIME: transport headers, plain and HTML bodies, sender and recipients, byte-identical attachments and attached emails as embedded messages. Each MSG carries the SHA-256 of its source message, and msg_item_map.csv ties every MSG to it.',
         forensicValue: 'HIGH',
-        preserves: ['Outlook-specific properties', 'Categories/flags', 'Named MAPI properties', 'Attachments', 'RTF body'],
-        limitations: ['Microsoft-proprietary format', 'Requires MAPI property knowledge to parse', 'May not preserve all MIME headers'],
+        preserves: ['Transport headers', 'Plain and HTML bodies', 'Sender and recipients', 'Attachments (byte-identical)', 'Attached emails as embedded messages', 'Read/flag state where the source reports it', 'Gmail labels as categories'],
+        limitations: ['The raw MIME itself is not inside the MSG (Outlook stores properties, not MIME); keep the EML export as the original evidence', 'S/MIME signatures cannot be re-verified from the MSG'],
         usedBy: ['Microsoft Outlook', 'Exchange', 'Forensic tools'],
       },
       pst: {
@@ -46,10 +47,10 @@ export class ExportService {
         name: 'MBOX (Unix Mailbox)',
         extension: '.mbox',
         mimeType: 'application/mbox',
-        description: 'Unix mailbox format. Concatenates messages separated by "From " lines. Simple, widely supported, but has escaping issues (From-munging). Multiple variants exist (mboxrd, mboxcl, mboxcl2, mboxo).',
-        forensicValue: 'MEDIUM',
-        preserves: ['Message content', 'Headers', 'MIME structure'],
-        limitations: ['From-line escaping modifies content', 'No standard for metadata', 'Single file can be very large', 'Variant differences'],
+        description: 'Unix mailbox (mboxrd). Every original message, byte for byte with its line endings untouched, after a "From " separator line; the only change inside a message is the reversible ">From " quoting mboxrd requires. mbox_item_map.csv gives each message\'s offset, size and SHA-256, and every message is read back from the written file and verified.',
+        forensicValue: 'HIGH',
+        preserves: ['Original message bytes (after reversible quoting)', 'Headers', 'MIME structure', 'Attachments'],
+        limitations: ['Readers must undo the mboxrd ">From " quoting to get the exact original bytes (mbox_item_map.csv says which messages had quoted lines)', 'No standard for metadata', 'Single file can be very large'],
         usedBy: ['Thunderbird', 'Unix mail tools', 'Google Takeout'],
       },
       mime: {
@@ -113,9 +114,30 @@ export class ExportService {
     let emailsFailed = 0;
     let attachmentsFailed = 0;
     const reconstructed = [];
+    const failed = [];
     const provider = options.provider || 'Unknown';
     const preserveFolders = options.preserveFolders !== false;
     const folderCounters = {};
+    // Every message that could not be exported is listed with its reason; none is dropped silently.
+    const fail = (msg, err) => {
+      failed.push({ id: msg.id || '', folder: msg.folder || msg.folder_path || '', subject: msg.subject || '', sha256: msg.hash_sha256 || msg.hashSha256 || '', error: err?.message || String(err) });
+      emailsFailed++;
+    };
+    const placeFile = (msg, ext, original) => {
+      const folder = msg.folder || msg.folder_path || 'INBOX';
+      const folderName = sanitizeFilename(folder.split('/').pop() || folder);
+      folderCounters[folder] = (folderCounters[folder] || 0) + 1;
+      const hash8 = (msg.hash_sha256 || msg.hashSha256 || 'unknown').substring(0, 8);
+      const filename = `${sanitizeFilename(provider)}_message_${folderCounters[folder]}_from_${folderName}_${hash8}${original ? '' : '_RECONSTRUCTED'}.${ext}`;
+      const subDir = preserveFolders ? path.join(outputDir, sanitizePath(folder)) : outputDir;
+      fs.mkdirSync(subDir, { recursive: true });
+      return { folder, filename, filePath: path.join(subDir, filename), relativePath: preserveFolders ? path.join(sanitizePath(folder), filename) : filename };
+    };
+    const addTextFile = (name, content) => {
+      const filePath = path.join(outputDir, name);
+      fs.writeFileSync(filePath, content, 'utf8');
+      files.push({ filename: name, path: filePath, relativePath: name, size: Buffer.byteLength(content), hash: crypto.createHash('sha256').update(content).digest('hex') });
+    };
 
     switch (format) {
       case 'eml':
@@ -123,48 +145,45 @@ export class ExportService {
         for (const msg of messages) {
           try {
             const result = this.exportMessageBytes(msg);
-            const folder = msg.folder || msg.folder_path || 'INBOX';
-            const folderName = sanitizeFilename(folder.split('/').pop() || folder);
-            folderCounters[folder] = (folderCounters[folder] || 0) + 1;
-            const n = folderCounters[folder];
-            const hash8 = (msg.hash_sha256 || msg.hashSha256 || 'unknown').substring(0, 8);
-            result.filename = `${sanitizeFilename(provider)}_message_${n}_from_${folderName}_${hash8}${result.original ? '' : '_RECONSTRUCTED'}.${format}`;
-            const subDir = preserveFolders ? path.join(outputDir, sanitizePath(folder)) : outputDir;
-            fs.mkdirSync(subDir, { recursive: true });
-            const filePath = path.join(subDir, result.filename);
-            const relativePath = preserveFolders ? path.join(sanitizePath(folder), result.filename) : result.filename;
+            const { filename, filePath, relativePath } = placeFile(msg, format, result.original);
             fs.writeFileSync(filePath, result.content);
             if (!result.original) reconstructed.push({ file: relativePath, subject: msg.subject, reason: result.problem });
-            files.push({ filename: result.filename, hash: result.hash, size: result.size, original: result.original, path: filePath, relativePath });
-          } catch { emailsFailed++; }
+            files.push({ filename, hash: result.hash, size: result.size, original: result.original, path: filePath, relativePath });
+          } catch (err) { fail(msg, err); }
         }
         break;
 
-      case 'msg':
+      case 'msg': {
+        // Converted from the original collected bytes, like PST items.
+        const items = [];
         for (const msg of messages) {
           try {
-            const result = this.generateMsg(msg);
-            const folder = msg.folder || msg.folder_path || 'INBOX';
-            const folderName = sanitizeFilename(folder.split('/').pop() || folder);
-            folderCounters[folder] = (folderCounters[folder] || 0) + 1;
-            const n = folderCounters[folder];
-            const hash8 = (msg.hash_sha256 || msg.hashSha256 || 'unknown').substring(0, 8);
-            result.filename = `${sanitizeFilename(provider)}_message_${n}_from_${folderName}_${hash8}.msg`;
-            const subDir = preserveFolders ? path.join(outputDir, sanitizePath(folder)) : outputDir;
-            fs.mkdirSync(subDir, { recursive: true });
-            const filePath = path.join(subDir, result.filename);
-            const relativePath = preserveFolders ? path.join(sanitizePath(folder), result.filename) : result.filename;
-            fs.writeFileSync(filePath, result.content);
-            files.push({ ...result, path: filePath, relativePath });
-          } catch { emailsFailed++; }
+            const bytes = this.exportMessageBytes(msg);
+            const { folder, filename, filePath, relativePath } = placeFile(msg, 'msg', bytes.original);
+            const { content, subject, messageId } = await mimeToMsg(bytes.content, itemMeta(msg, provider, folder));
+            fs.writeFileSync(filePath, content);
+            if (!bytes.original) reconstructed.push({ file: relativePath, subject: msg.subject, reason: bytes.problem });
+            files.push({ filename, hash: crypto.createHash('sha256').update(content).digest('hex'), size: content.length, original: bytes.original, path: filePath, relativePath });
+            items.push({ file: relativePath, folder, subject, messageId, sha256: crypto.createHash('sha256').update(bytes.content).digest('hex'), original: bytes.original, id: msg.id || '' });
+          } catch (err) { fail(msg, err); }
         }
+        const rows = [['MSG File', 'Source Folder', 'Subject', 'Internet Message-ID', 'Source SHA-256', 'Source', 'SherlockMail Message ID'].join(',')];
+        for (const it of items) rows.push([it.file, it.folder, it.subject, it.messageId, it.sha256, it.original ? 'original collected MIME' : 'RECONSTRUCTED', it.id].map(csvCell).join(','));
+        addTextFile('msg_item_map.csv', rows.join('\r\n') + '\r\n');
         break;
+      }
 
       case 'mbox': {
         const filePath = path.join(outputDir, `collection_${new Date().toISOString().replace(/[:.]/g, '-')}.mbox`);
         const result = this.generateMbox(messages, filePath);
         reconstructed.push(...result.reconstructed);
+        for (const f of result.failed) fail(f.msg, f.error);
         files.push({ filename: result.filename, hash: result.hash, size: result.size, messageCount: result.messageCount, path: filePath, relativePath: result.filename });
+        addTextFile('mbox_item_map.csv', result.itemMap);
+        if (result.verifyProblems.length) {
+          for (const p of result.verifyProblems) failed.push({ id: p.id, folder: p.folder, subject: p.subject, sha256: p.sha256, error: p.error });
+          emailsFailed += result.verifyProblems.length;
+        }
         break;
       }
 
@@ -182,6 +201,7 @@ export class ExportService {
         });
         files.push(...result.files);
         reconstructed.push(...result.reconstructed);
+        for (const f of result.failed) failed.push({ id: f.id || '', folder: f.folder || '', subject: f.subject || '', sha256: '', error: f.error });
         emailsFailed += result.failed.length;
         const mapContent = itemMapCsv(result.items);
         const mapPath = path.join(outputDir, 'pst_item_map.csv');
@@ -221,7 +241,7 @@ export class ExportService {
             const filePath = path.join(outputDir, result.filename);
             fs.writeFileSync(filePath, result.content);
             files.push({ ...result, path: filePath, relativePath: result.filename });
-          } catch { emailsFailed += group.messages.length; }
+          } catch (err) { for (const m of group.messages) fail(m, err); }
         }
         break;
       }
@@ -248,7 +268,16 @@ export class ExportService {
       }
     }
 
-    const manifest = this.generateHashManifest(files, messages, { emailsFailed, attachmentsFailed, reconstructed });
+    if (failed.length) {
+      const rows = [['SherlockMail Message ID', 'Folder', 'Subject', 'Source SHA-256', 'Error'].join(',')];
+      for (const f of failed) rows.push([f.id, f.folder, f.subject, f.sha256, f.error].map(csvCell).join(','));
+      addTextFile('export_failed_items.csv', rows.join('\r\n') + '\r\n');
+    }
+
+    // Every exported file is read back from disk and hashed: what the manifest lists is what was written.
+    const verificationFailures = await this.verifyWrittenFiles(files);
+
+    const manifest = this.generateHashManifest(files, messages, { emailsFailed, attachmentsFailed, reconstructed, failed, verificationFailures });
     const manifestPath = path.join(outputDir, 'manifest.txt');
     fs.writeFileSync(manifestPath, manifest.text, 'utf8');
 
@@ -260,7 +289,35 @@ export class ExportService {
     const metadataCsvPath = path.join(outputDir, 'metadata.csv');
     fs.writeFileSync(metadataCsvPath, metadataCsv.content, 'utf8');
 
-    return { files, manifest, sessionManifest, metadataCsv, outputDir, reconstructed };
+    return { files, manifest, sessionManifest, metadataCsv, outputDir, reconstructed, failed, verificationFailures };
+  }
+
+  // Re-reads each written file and computes MD5, SHA-1 and SHA-256 from the bytes on disk. A file whose
+  // SHA-256 differs from what was produced in memory is reported, never silently accepted.
+  static async verifyWrittenFiles(files) {
+    const problems = [];
+    for (const f of files) {
+      const md5 = crypto.createHash('md5'), sha1 = crypto.createHash('sha1'), sha256 = crypto.createHash('sha256');
+      let size = 0;
+      try {
+        for await (const chunk of fs.createReadStream(f.path)) {
+          md5.update(chunk); sha1.update(chunk); sha256.update(chunk);
+          size += chunk.length;
+        }
+      } catch (err) {
+        f.verified = false;
+        problems.push({ file: f.relativePath || f.filename, error: `could not be read back: ${err.message}` });
+        continue;
+      }
+      const onDisk = sha256.digest('hex');
+      f.md5 = md5.digest('hex');
+      f.sha1 = sha1.digest('hex');
+      f.verified = (!f.hash || f.hash === onDisk) && (f.size == null || f.size === size);
+      if (!f.verified) problems.push({ file: f.relativePath || f.filename, error: `file on disk (SHA-256 ${onDisk}, ${size} bytes) differs from what was written (SHA-256 ${f.hash}, ${f.size} bytes)` });
+      f.hash = onDisk;
+      f.size = size;
+    }
+    return problems;
   }
 
   // The bytes collected from the server, provided the file still matches the hash recorded at collection.
@@ -360,179 +417,15 @@ export class ExportService {
     };
   }
 
-  static generateMsg(message) {
-    const from = message.from_address || message.fromAddress || '';
-    const to = parseJsonField(message.to_addresses || message.toAddresses, []);
-    const cc = parseJsonField(message.cc_addresses || message.ccAddresses, []);
-    const subject = message.subject || '(no subject)';
-    const bodyText = (message.body_text || message.bodyText || '').substring(0, 250000);
-    const msgIdVal = message.message_id || message.messageId || '';
-    const sha256 = message.hash_sha256 || message.hashSha256 || '';
-    const toStr = Array.isArray(to) ? to.join('; ') : to;
-    const ccStr = Array.isArray(cc) ? cc.join('; ') : cc;
-
-    const subjectBuf = Buffer.from(subject + '\0', 'utf16le');
-    const fromBuf = Buffer.from(from + '\0', 'utf16le');
-    const toBuf = Buffer.from(toStr + '\0', 'utf16le');
-    const bodyBuf = Buffer.from(bodyText + '\0', 'utf16le');
-    const msgIdBuf = Buffer.from(msgIdVal + '\0', 'utf16le');
-    const msgClassBuf = Buffer.from('IPM.Note\0', 'utf16le');
-    const ccBuf = ccStr ? Buffer.from(ccStr + '\0', 'utf16le') : null;
-
-    const varProps = [
-      [0x001A, msgClassBuf], [0x0037, subjectBuf], [0x0C1A, fromBuf],
-      [0x0E04, toBuf], [0x1000, bodyBuf], [0x1035, msgIdBuf],
-    ];
-    if (ccBuf) varProps.push([0x0E03, ccBuf]);
-
-    const fixedCount = 2;
-    const propsData = Buffer.alloc(32 + (fixedCount + varProps.length) * 16, 0);
-    let po = 32;
-    propsData.writeUInt16LE(0x0003, po); propsData.writeUInt16LE(0x0E07, po + 2);
-    propsData.writeUInt32LE(6, po + 4); propsData.writeUInt32LE(1, po + 8);
-    po += 16;
-    if (message.date) {
-      const ft = (BigInt(new Date(message.date).getTime()) + 11644473600000n) * 10000n;
-      propsData.writeUInt16LE(0x0040, po); propsData.writeUInt16LE(0x0E06, po + 2);
-      propsData.writeUInt32LE(6, po + 4); propsData.writeBigUInt64LE(ft, po + 8);
-    }
-    po += 16;
-    for (const [propId, buf] of varProps) {
-      propsData.writeUInt16LE(0x001F, po); propsData.writeUInt16LE(propId, po + 2);
-      propsData.writeUInt32LE(6, po + 4); propsData.writeUInt32LE(buf.length, po + 8);
-      po += 16;
-    }
-
-    const streams = [['__properties_version1.0', propsData]];
-    for (const [propId, buf] of varProps) {
-      streams.push([`__substg1.0_${propId.toString(16).toUpperCase().padStart(4, '0')}001F`, buf]);
-    }
-
-    const content = this._buildCfb(streams);
-    return {
-      content,
-      filename: `${sanitizeFilename(subject)}_${sha256?.substring(0, 8) || 'unknown'}.msg`,
-      hash: crypto.createHash('sha256').update(content).digest('hex'),
-      size: content.length,
-    };
-  }
-
-  static _buildCfb(streamEntries) {
-    const S = 512, MS = 64, CUT = 4096;
-    const END = 0xFFFFFFFE, FAT_M = 0xFFFFFFFD, FREE = 0xFFFFFFFF, NONE = 0xFFFFFFFF;
-
-    const mini = [], regular = [];
-    for (const [name, data] of streamEntries) {
-      (data.length < CUT ? mini : regular).push({ name, data });
-    }
-
-    let mIdx = 0;
-    const miniParts = [], miniStarts = new Map(), miniSizes = new Map();
-    for (const { name, data } of mini) {
-      miniStarts.set(name, mIdx);
-      miniSizes.set(name, data.length);
-      const cnt = Math.max(1, Math.ceil(data.length / MS));
-      const pad = Buffer.alloc(cnt * MS, 0);
-      data.copy(pad);
-      miniParts.push(pad);
-      mIdx += cnt;
-    }
-    const miniContainer = miniParts.length ? Buffer.concat(miniParts) : Buffer.alloc(0);
-    const mcSecs = miniContainer.length ? Math.ceil(miniContainer.length / S) : 0;
-
-    const mfEntries = mIdx;
-    const mfBuf = mfEntries ? Buffer.alloc(Math.max(S, Math.ceil(mfEntries * 4 / S) * S), 0xFF) : null;
-    if (mfBuf) {
-      let mi = 0;
-      for (const { data } of mini) {
-        const cnt = Math.max(1, Math.ceil(data.length / MS));
-        for (let s = 0; s < cnt; s++) { mfBuf.writeUInt32LE(s < cnt - 1 ? mi + 1 : END, mi * 4); mi++; }
-      }
-    }
-    const mfSecs = mfBuf ? Math.ceil(mfBuf.length / S) : 0;
-
-    const regSecs = regular.map(s => Math.max(1, Math.ceil(s.data.length / S)));
-    const dirCount = 1 + streamEntries.length;
-    const dirSecs = Math.max(1, Math.ceil(dirCount / 4));
-
-    let si = 0;
-    const dirStart = si; si += dirSecs;
-    const mcStart = si; si += mcSecs;
-    const mfStart = si; si += mfSecs;
-    const regStarts = new Map();
-    regular.forEach((s, i) => { regStarts.set(s.name, si); si += regSecs[i]; });
-    const dataSecs = si;
-    let fatSecs = Math.max(1, Math.ceil(dataSecs / 127));
-    while (dataSecs + fatSecs > fatSecs * 128) fatSecs++;
-    const fatStart = si; si += fatSecs;
-
-    const fatBuf = Buffer.alloc(fatSecs * S, 0xFF);
-    const fw = (idx, val) => { if (idx * 4 < fatBuf.length) fatBuf.writeUInt32LE(val, idx * 4); };
-    for (let i = dirStart; i < dirStart + dirSecs; i++) fw(i, i < dirStart + dirSecs - 1 ? i + 1 : END);
-    for (let i = mcStart; i < mcStart + mcSecs; i++) fw(i, i < mcStart + mcSecs - 1 ? i + 1 : END);
-    for (let i = mfStart; i < mfStart + mfSecs; i++) fw(i, i < mfStart + mfSecs - 1 ? i + 1 : END);
-    regular.forEach((s, ri) => { const st = regStarts.get(s.name); for (let i = st; i < st + regSecs[ri]; i++) fw(i, i < st + regSecs[ri] - 1 ? i + 1 : END); });
-    for (let i = fatStart; i < fatStart + fatSecs; i++) fw(i, FAT_M);
-
-    const dirBuf = Buffer.alloc(dirSecs * S, 0);
-    for (let i = dirCount; i < dirSecs * 4; i++) {
-      const o = i * 128;
-      dirBuf.writeUInt32LE(NONE, o + 68); dirBuf.writeUInt32LE(NONE, o + 72);
-      dirBuf.writeUInt32LE(NONE, o + 76); dirBuf.writeUInt32LE(END, o + 116);
-    }
-    const wDE = (idx, name, type, left, right, child, start, size) => {
-      const o = idx * 128;
-      const nb = Buffer.from(name + '\0', 'utf16le');
-      nb.copy(dirBuf, o, 0, Math.min(nb.length, 64));
-      dirBuf.writeUInt16LE(Math.min(nb.length, 64), o + 64);
-      dirBuf[o + 66] = type; dirBuf[o + 67] = 1;
-      dirBuf.writeUInt32LE(left, o + 68); dirBuf.writeUInt32LE(right, o + 72);
-      dirBuf.writeUInt32LE(child, o + 76);
-      dirBuf.writeUInt32LE(start, o + 116); dirBuf.writeUInt32LE(size, o + 120);
-    };
-
-    const bTree = (arr) => {
-      if (!arr.length) return null;
-      const m = arr.length >> 1;
-      return { i: arr[m], l: bTree(arr.slice(0, m)), r: bTree(arr.slice(m + 1)) };
-    };
-    const tree = bTree(streamEntries.map((_, i) => i + 1));
-    const writeNodes = (n) => {
-      if (!n) return;
-      const name = streamEntries[n.i - 1][0];
-      const ls = n.l ? n.l.i : NONE, rs = n.r ? n.r.i : NONE;
-      let start, size;
-      if (miniStarts.has(name)) { start = miniStarts.get(name); size = miniSizes.get(name); }
-      else { start = regStarts.get(name); size = regular.find(s => s.name === name).data.length; }
-      wDE(n.i, name, 2, ls, rs, NONE, start, size);
-      writeNodes(n.l); writeNodes(n.r);
-    };
-    wDE(0, 'Root Entry', 5, NONE, NONE, tree ? tree.i : NONE, mcSecs > 0 ? mcStart : END, miniContainer.length);
-    writeNodes(tree);
-
-    const hdr = Buffer.alloc(S, 0);
-    Buffer.from([0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]).copy(hdr);
-    hdr.writeUInt16LE(0x003E, 24); hdr.writeUInt16LE(0x0003, 26);
-    hdr.writeUInt16LE(0xFFFE, 28); hdr.writeUInt16LE(9, 30); hdr.writeUInt16LE(6, 32);
-    hdr.writeUInt32LE(fatSecs, 44); hdr.writeUInt32LE(dirStart, 48);
-    hdr.writeUInt32LE(CUT, 56);
-    hdr.writeUInt32LE(mfSecs > 0 ? mfStart : END, 60); hdr.writeUInt32LE(mfSecs, 64);
-    hdr.writeUInt32LE(END, 68); hdr.writeUInt32LE(0, 72);
-    for (let i = 0; i < 109; i++) hdr.writeUInt32LE(i < fatSecs ? fatStart + i : FREE, 76 + i * 4);
-
-    const pad = (b) => { const r = b.length % S; return r ? Buffer.concat([b, Buffer.alloc(S - r)]) : b; };
-    const parts = [hdr, dirBuf];
-    if (mcSecs) parts.push(pad(miniContainer));
-    if (mfSecs) parts.push(mfBuf);
-    for (const s of regular) parts.push(pad(s.data));
-    parts.push(fatBuf);
-    return Buffer.concat(parts);
-  }
-
-  // mboxrd: each original message (byte-for-byte, apart from the reversible ">From " quoting) after a
-  // "From sender asctime-date" separator line.
+  // mboxrd: each original message after a "From sender asctime-date" separator line. The message bytes are
+  // written exactly as collected, line endings included; the only change is the reversible ">From "
+  // quoting (a line starting with zero or more ">" then "From " gets one more ">"), plus a final line
+  // feed when a message does not end with one. The item map records where each message sits, and the
+  // written file is read back to prove every message unquotes to its original SHA-256.
   static generateMbox(messages, filePath) {
     const reconstructed = [];
+    const failed = [];
+    const items = [];
     const filename = path.basename(filePath);
     const hash = crypto.createHash('sha256');
     let size = 0;
@@ -542,6 +435,7 @@ export class ExportService {
       fs.writeSync(fd, buf);
       hash.update(buf);
       size += buf.length;
+      return buf.length;
     };
     const asctime = (d) => {
       const dt = isNaN(d.getTime()) ? new Date(0) : d;
@@ -553,21 +447,66 @@ export class ExportService {
 
     try {
       for (const msg of messages) {
-        const exported = this.exportMessageBytes(msg);
-        if (!exported.original) reconstructed.push({ file: filename, subject: msg.subject, reason: exported.problem });
-        const sender = ((msg.from_address || msg.fromAddress || '').match(/[^\s<>"]+@[^\s<>"]+/) || ['MAILER-DAEMON'])[0];
-        // latin1 maps every byte to one character and back, so 8-bit content survives unchanged.
-        const raw = exported.content.toString('latin1').replace(/\r\n/g, '\n');
-        const quoted = raw.replace(/^(>*From )/gm, '>$1');
-        write(`From ${sender} ${asctime(new Date(msg.date))}\n`);
-        write(quoted.endsWith('\n') ? quoted : `${quoted}\n`);
-        write('\n');
+        try {
+          const exported = this.exportMessageBytes(msg);
+          if (!exported.original) reconstructed.push({ file: filename, subject: msg.subject, reason: exported.problem });
+          const sender = ((msg.from_address || msg.fromAddress || '').match(/[^\s<>"]+@[^\s<>"]+/) || ['MAILER-DAEMON'])[0];
+          // latin1 maps every byte to one character and back, so 8-bit content survives unchanged.
+          const raw = exported.content.toString('latin1');
+          let quotedLines = 0;
+          const quoted = raw.replace(/^(>*From )/gm, (m) => { quotedLines++; return `>${m}`; });
+          const appendedNewline = !raw.endsWith('\n');
+          const separatorOffset = size;
+          write(`From ${sender} ${asctime(new Date(msg.date))}\n`);
+          const messageOffset = size;
+          const storedLength = write(appendedNewline ? `${quoted}\n` : quoted);
+          write('\n');
+          items.push({
+            msg, separatorOffset, messageOffset, storedLength, originalSize: exported.content.length, quotedLines, appendedNewline,
+            sha256: crypto.createHash('sha256').update(exported.content).digest('hex'), original: exported.original,
+          });
+        } catch (err) {
+          failed.push({ msg, error: err });
+        }
       }
     } finally {
       fs.closeSync(fd);
     }
 
-    return { filename, hash: hash.digest('hex'), size, messageCount: messages.length, reconstructed };
+    // Read the file back and undo the quoting: each message must match its original SHA-256 and size.
+    const verifyProblems = [];
+    const rfd = fs.openSync(filePath, 'r');
+    for (const it of items) {
+      const chunk = Buffer.alloc(it.storedLength);
+      let got = 0;
+      try {
+        while (got < chunk.length) {
+          const n = fs.readSync(rfd, chunk, got, chunk.length - got, it.messageOffset + got);
+          if (!n) break;
+          got += n;
+        }
+      } catch { /* a short read fails the check below */ }
+      let restored = chunk.subarray(0, got).toString('latin1').replace(/^>(>*From )/gm, '$1');
+      if (it.appendedNewline) restored = restored.slice(0, -1);
+      const buf = Buffer.from(restored, 'latin1');
+      it.verified = buf.length === it.originalSize && crypto.createHash('sha256').update(buf).digest('hex') === it.sha256;
+      if (!it.verified) {
+        verifyProblems.push({ id: it.msg.id || '', folder: it.msg.folder || '', subject: it.msg.subject || '', sha256: it.sha256, error: 'MBOX copy does not unquote to the original message bytes' });
+      }
+    }
+    fs.closeSync(rfd);
+
+    const rows = [['Message #', 'Separator Offset', 'Message Offset', 'Stored Length', 'Original Size', 'Source SHA-256', 'Quoted ">From " Lines', 'Line Feed Appended', 'Verified After Writing', 'Source', 'Folder', 'Subject', 'SherlockMail Message ID'].join(',')];
+    items.forEach((it, i) => rows.push([
+      i + 1, it.separatorOffset, it.messageOffset, it.storedLength, it.originalSize, it.sha256, it.quotedLines,
+      it.appendedNewline ? 'yes' : 'no', it.verified ? 'yes' : 'NO', it.original ? 'original collected MIME' : 'RECONSTRUCTED',
+      it.msg.folder || '', it.msg.subject || '', it.msg.id || '',
+    ].map(csvCell).join(',')));
+
+    return {
+      filename, hash: hash.digest('hex'), size, messageCount: items.length, reconstructed, failed, verifyProblems,
+      itemMap: rows.join('\r\n') + '\r\n',
+    };
   }
 
   static _groupByFolder(messages) {
@@ -984,7 +923,7 @@ ${fileEntries}
     text += `${sep}\n`;
     text += `Generated:       ${generated}\n`;
     text += `Tool:            SherlockMail v0.9.0\n`;
-    text += `Hash Algorithm:  SHA-256\n`;
+    text += `Hash Algorithms: MD5, SHA-1, SHA-256 (each file re-read from disk after writing)\n`;
     text += `File Count:      ${exportedFiles.length}\n`;
     text += `Total Size:      ${totalBytes} bytes\n`;
     text += `Emails:          ${emailCount}\n`;
@@ -993,9 +932,20 @@ ${fileEntries}
     text += `Attach. Failed:  ${attachmentsFailed}\n`;
     const rebuilt = stats.reconstructed || [];
     text += `Reconstructed:   ${rebuilt.length}${rebuilt.length ? ' (NOT the original collected MIME; see below)' : ' (every message exported from its original collected bytes)'}\n`;
+    const verifyProblems = stats.verificationFailures || [];
+    text += `Verified:        ${verifyProblems.length ? `NO: ${verifyProblems.length} file(s) on disk differ from what was written (see below)` : 'every file read back from disk matches what was written'}\n`;
     if (rebuilt.length) {
       text += `\n${sep}\nRECONSTRUCTED MESSAGES\n${thin}\n`;
       for (const r of rebuilt) text += `${r.file} | ${r.subject || ''} | ${r.reason}\n`;
+    }
+    const failedItems = stats.failed || [];
+    if (failedItems.length) {
+      text += `\n${sep}\nMESSAGES NOT EXPORTED (also in export_failed_items.csv)\n${thin}\n`;
+      for (const f of failedItems) text += `${f.folder} | ${f.subject} | ${f.sha256 || ''} | ${f.error}\n`;
+    }
+    if (verifyProblems.length) {
+      text += `\n${sep}\nVERIFICATION FAILURES\n${thin}\n`;
+      for (const p of verifyProblems) text += `${p.file} | ${p.error}\n`;
     }
     text += `\n${sep}\n`;
     text += `EXPORTED FILES\n`;
@@ -1003,11 +953,14 @@ ${fileEntries}
 
     for (let i = 0; i < exportedFiles.length; i++) {
       const f = exportedFiles[i];
-      const fname = f.filename || f.relativePath;
-      const ext = (fname || '').split('.').pop();
+      // The path relative to the export folder, so the manifest can be checked file by file.
+      const fname = (f.relativePath || f.filename || '').replace(/\\/g, '/');
+      const ext = fname.split('.').pop();
       text += `[${i + 1}] ${fname}\n`;
       text += `    Format:  ${ext}\n`;
       text += `    Size:    ${f.size} bytes\n`;
+      if (f.md5) text += `    MD5:     ${f.md5}\n`;
+      if (f.sha1) text += `    SHA-1:   ${f.sha1}\n`;
       text += `    SHA-256: ${f.hash}\n\n`;
     }
 
@@ -1039,15 +992,19 @@ ${fileEntries}
 
     const text = fs.readFileSync(manifestPath, 'utf8');
     const fileEntries = [];
-    const entryPattern = /^\[(\d+)\]\s+(.+)\n\s+Format:\s+\S+\n\s+Size:\s+\d+ bytes\n\s+SHA-256:\s+([a-f0-9]+)/gm;
+    const entryPattern = /^\[(\d+)\]\s+(.+)\n\s+Format:\s+\S+\n\s+Size:\s+\d+ bytes\n(?:\s+MD5:\s+[a-f0-9]+\n)?(?:\s+SHA-1:\s+[a-f0-9]+\n)?\s+SHA-256:\s+([a-f0-9]+)/gm;
     let match;
     while ((match = entryPattern.exec(text)) !== null) {
-      fileEntries.push({ filename: match[2], sha256: match[3] });
+      fileEntries.push({ filename: match[2].trim(), sha256: match[3] });
     }
 
     const results = [];
     for (const fileEntry of fileEntries) {
-      const filePath = path.join(exportDir, fileEntry.filename);
+      const filePath = path.resolve(exportDir, fileEntry.filename);
+      if (!filePath.startsWith(path.resolve(exportDir) + path.sep)) {
+        results.push({ filename: fileEntry.filename, status: 'outside the export folder' });
+        continue;
+      }
       if (!fs.existsSync(filePath)) {
         results.push({ filename: fileEntry.filename, status: 'missing' });
         continue;
@@ -1091,6 +1048,11 @@ ${fileEntries}
     }
     return exports;
   }
+}
+
+function csvCell(value) {
+  const s = String(value ?? '');
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
 function sanitizeFilename(name) {

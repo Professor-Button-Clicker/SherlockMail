@@ -96,8 +96,9 @@ function guidBytes(guid) {
   return Buffer.concat([Buffer.from(b.subarray(0, 4)).reverse(), Buffer.from(b.subarray(4, 6)).reverse(), Buffer.from(b.subarray(6, 8)).reverse(), b.subarray(8)]);
 }
 
-// Named properties (MS-PST section 2.4.7): string names in a GUID's property set, numbered from 0x8000.
-class NameMap {
+// Named properties (MS-PST section 2.4.7, and MS-OXMSG section 2.2.3 for MSG files, which use the same
+// records): string names in a GUID's property set, numbered from 0x8000.
+export class NameMap {
   constructor() { this.entries = []; this.byKey = new Map(); this.guids = []; this.strings = []; this.stringLen = 0; }
 
   tag(guid, name, type) {
@@ -124,7 +125,8 @@ class NameMap {
     return tag(0x8000 + idx, type);
   }
 
-  props() {
+  // The GUID, entry and string streams, and the name-to-ID hash buckets (251 in a PST, 0x1F in an MSG).
+  streams(bucketCount) {
     const record = (dw, e, i) => {
       const b = Buffer.alloc(8);
       b.writeUInt32LE(dw >>> 0, 0);
@@ -132,18 +134,28 @@ class NameMap {
       b.writeUInt16LE(i, 6);
       return b;
     };
-    const props = new Map([[tag(0x0001, PT.I4), 251]]);
-    props.set(tag(0x0002, PT.BINARY), Buffer.concat(this.guids.map(guidBytes)));
-    props.set(tag(0x0003, PT.BINARY), Buffer.concat(this.entries.map((e, i) => record(e.offset, e, i))));
-    props.set(tag(0x0004, PT.BINARY), Buffer.concat(this.strings));
-    const buckets = new Map();
+    const lists = new Map();
     this.entries.forEach((e, i) => {
       const r = record(e.crc, e, i);
-      const bucket = ((r.readUInt32LE(0) ^ (r.readUInt32LE(4) & 0xFFFF)) >>> 0) % 251;
-      if (!buckets.has(bucket)) buckets.set(bucket, []);
-      buckets.get(bucket).push(r);
+      const bucket = ((r.readUInt32LE(0) ^ (r.readUInt32LE(4) & 0xFFFF)) >>> 0) % bucketCount;
+      if (!lists.has(bucket)) lists.set(bucket, []);
+      lists.get(bucket).push(r);
     });
-    for (const [b, list] of buckets) props.set(tag(0x1000 + b, PT.BINARY), Buffer.concat(list));
+    return {
+      guids: Buffer.concat(this.guids.map(guidBytes)),
+      entries: Buffer.concat(this.entries.map((e, i) => record(e.offset, e, i))),
+      strings: Buffer.concat(this.strings),
+      buckets: new Map([...lists].map(([b, list]) => [b, Buffer.concat(list)])),
+    };
+  }
+
+  props() {
+    const s = this.streams(251);
+    const props = new Map([[tag(0x0001, PT.I4), 251]]);
+    props.set(tag(0x0002, PT.BINARY), s.guids);
+    props.set(tag(0x0003, PT.BINARY), s.entries);
+    props.set(tag(0x0004, PT.BINARY), s.strings);
+    for (const [b, buf] of s.buckets) props.set(tag(0x1000 + b, PT.BINARY), buf);
     return props;
   }
 }

@@ -3,10 +3,11 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_DIR = path.join(__dirname, '..', '..', 'data');
+// The app's data folder (the user's profile in the installed app), like the Google and Microsoft sign-ins.
+const CONFIG_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
 const CREDENTIALS_PATH = path.join(CONFIG_DIR, 'fastmail-credentials.json');
 
-const SESSION_URL = 'https://api.fastmail.com/jmap/session';
+const SESSION_URL = process.env.SHERLOCKMAIL_JMAP_SESSION_URL || 'https://api.fastmail.com/jmap/session';
 
 function ensureDataDir() {
   if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });

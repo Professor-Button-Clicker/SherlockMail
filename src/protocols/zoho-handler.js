@@ -1,6 +1,8 @@
-import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getAccessToken, getAuthStatus, getApiBase, loadCredentials } from '../services/zoho-oauth.js';
+import { buildMessageRecord, withRetry } from '../services/collection-engine.js';
+
+const LIST_PAGE = 200; // the most Zoho's messages/view returns per request
 
 export class ZohoHandler {
   constructor(config) {
@@ -36,6 +38,25 @@ export class ZohoHandler {
     }
 
     return res.json();
+  }
+
+  // The original message (MIME) as Zoho stores it. Zoho may answer with the message itself or with JSON
+  // whose data.content holds it as text.
+  async originalMessage(messageId) {
+    const url = `${this.apiBase}/api/accounts/${this.accountId}/messages/${messageId}/originalmessage`;
+    const res = await fetch(url, { headers: { Authorization: `Zoho-oauthtoken ${this.accessToken}`, Accept: '*/*' }, signal: AbortSignal.timeout(120000) });
+    if (!res.ok) {
+      const err = new Error(`Original message download failed (HTTP ${res.status})`);
+      if (res.status === 404) err.permanent = true;
+      throw err;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (/json/i.test(res.headers.get('content-type') || '')) {
+      const content = JSON.parse(buf.toString('utf8'))?.data?.content;
+      if (typeof content !== 'string' || !content) throw new Error('Zoho returned no original message content');
+      return { raw: Buffer.from(content, 'utf8'), fromJson: true };
+    }
+    return { raw: buf, fromJson: false };
   }
 
   async connect() {
@@ -111,12 +132,12 @@ export class ZohoHandler {
     };
   }
 
+  // Every message in the folder (or the first `limit`), each built from its original message. A message
+  // whose original cannot be downloaded is returned with fetchError and no content; nothing is made up.
   async fetchMessages(folderIdOrPath, { limit } = {}) {
     const folderId = typeof folderIdOrPath === 'string'
       ? folderIdOrPath
       : folderIdOrPath.zohoFolderId || folderIdOrPath.path || folderIdOrPath;
-
-    const top = limit || 25;
 
     let resolvedFolderId = folderId;
     if (!/^\d+$/.test(folderId)) {
@@ -126,48 +147,40 @@ export class ZohoHandler {
       resolvedFolderId = match.folderId;
     }
 
-    const listUrl = `/accounts/${this.accountId}/folders/${resolvedFolderId}/messages?limit=${top}`;
-    this.log('C→S', `GET ${this.apiBase}/api${listUrl}`);
-
-    const listData = await this.zohoFetch(listUrl);
-    const msgStubs = listData.data || [];
-
-    this.log('S→C', `200 OK - ${msgStubs.length} messages listed`);
+    const stubs = [];
+    for (let start = 1; ;) {
+      const listUrl = `/accounts/${this.accountId}/messages/view?folderId=${encodeURIComponent(resolvedFolderId)}&start=${start}&limit=${LIST_PAGE}`;
+      this.log('C→S', `GET ${this.apiBase}/api${listUrl}`);
+      const page = (await this.zohoFetch(listUrl)).data || [];
+      stubs.push(...page);
+      start += page.length;
+      if (page.length < LIST_PAGE || (limit > 0 && stubs.length >= limit)) break;
+    }
+    const selected = limit > 0 ? stubs.slice(0, limit) : stubs;
+    this.log('S→C', `200 OK - ${selected.length} message(s) listed`);
 
     const messages = [];
-    for (const stub of msgStubs) {
-      this.log('C→S', `GET ${this.apiBase}/api/accounts/${this.accountId}/folders/${resolvedFolderId}/messages/${stub.messageId}`);
-
-      const msgData = await this.zohoFetch(`/accounts/${this.accountId}/folders/${resolvedFolderId}/messages/${stub.messageId}`);
-      const msg = msgData.data || {};
-
-      const rawContent = `From: ${msg.sender || stub.fromAddress || ''}\r\nTo: ${msg.toAddress || ''}\r\nSubject: ${msg.subject || stub.subject || ''}\r\nDate: ${msg.receivedTime || stub.receivedTime || ''}\r\nMIME-Version: 1.0\r\nContent-Type: ${msg.contentType || 'text/plain'}\r\n\r\n${msg.content || ''}`;
-      const rawBuffer = Buffer.from(rawContent, 'utf8');
-
-      this.log('S→C', `200 OK - message content (${rawBuffer.length} bytes)`);
-
-      messages.push({
-        id: uuidv4(),
-        uid: messages.length + 1,
-        zohoMessageId: stub.messageId,
-        folder: folderIdOrPath,
-        subject: msg.subject || stub.subject || '(no subject)',
-        fromAddress: msg.sender || stub.fromAddress || '',
-        toAddresses: (msg.toAddress || stub.toAddress || '').split(',').map(s => s.trim()).filter(Boolean),
-        ccAddresses: (msg.ccAddress || '').split(',').map(s => s.trim()).filter(Boolean),
-        date: msg.receivedTime || stub.receivedTime || new Date().toISOString(),
-        size: rawBuffer.length,
-        hashMd5: crypto.createHash('md5').update(rawBuffer).digest('hex'),
-        hashSha256: crypto.createHash('sha256').update(rawBuffer).digest('hex'),
-        hashSha512: crypto.createHash('sha512').update(rawBuffer).digest('hex'),
-        hasAttachments: (msg.hasAttachment === 'true' || stub.hasAttachment === 'true'),
-        attachmentCount: parseInt(msg.attachmentCount || '0'),
-        bodyText: (msg.content || '').substring(0, 1000),
-        contentType: msg.contentType || 'text/plain',
-      });
+    let fromJson = 0;
+    for (const stub of selected) {
+      const uid = messages.length + 1;
+      const received = Number(stub.receivedTime);
+      try {
+        const original = await withRetry(() => this.originalMessage(stub.messageId), { attempts: 3 });
+        if (original.fromJson) fromJson++;
+        const record = await buildMessageRecord(original.raw, {
+          uid, serviceId: String(stub.messageId), folder: folderIdOrPath,
+          internalDate: Number.isFinite(received) && received > 0 ? new Date(received).toISOString() : null,
+        });
+        messages.push({ ...record, zohoMessageId: stub.messageId, rawFromJson: original.fromJson });
+      } catch (err) {
+        messages.push({ id: uuidv4(), uid, zohoMessageId: stub.messageId, serviceId: String(stub.messageId), folder: folderIdOrPath, subject: stub.subject, fetchError: err.message });
+      }
     }
 
-    this.log('CLIENT', `Fetched ${messages.length} messages from folder ${folderIdOrPath} via Zoho API`);
+    // Text inside JSON cannot carry bytes that are not valid UTF-8, so such a message may differ from
+    // the stored copy; say so rather than imply byte-exactness.
+    if (fromJson) this.log('CLIENT', `Note: Zoho returned ${fromJson} original message(s) as JSON text; any 8-bit content that was not UTF-8 cannot be byte-identical to the server's copy`);
+    this.log('CLIENT', `Fetched ${messages.filter(m => !m.fetchError).length} original message(s) from folder ${folderIdOrPath} via Zoho API${messages.some(m => m.fetchError) ? `; ${messages.filter(m => m.fetchError).length} could not be downloaded` : ''}`);
     return messages;
   }
 

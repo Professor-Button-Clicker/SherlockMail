@@ -32,6 +32,18 @@ function readState(msg, provider) {
   return undefined;
 }
 
+// What a collected message's database row adds to its MIME when it becomes an Outlook item (PST or MSG).
+export function itemMeta(msg, provider, folderPath = String(msg.folder || msg.folder_path || 'INBOX')) {
+  return {
+    readState: readState(msg, provider),
+    flagged: parseList(msg.flags).some(f => f === '\\Flagged' || f === 'STARRED'),
+    labels: parseList(msg.labels).filter(l => typeof l === 'string' && !/^(UNREAD|STARRED|IMPORTANT|CATEGORY_|INBOX$|SENT$|DRAFT$|SPAM$|TRASH$)/.test(l)),
+    sourceFolder: folderPath,
+    acquiredAt: msg.acquired_at,
+    internalDate: msg.internal_date,
+  };
+}
+
 const csvCell = v => {
   const s = String(v ?? '');
   return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -101,14 +113,7 @@ export async function exportMessagesToPst(messages, { outputDir, baseName = 'col
       try {
         const bytes = readMessage(msg);
         const writer = pst.current();
-        const { spec, subject, messageId } = await mimeToMessage(bytes.content, writer, {
-          readState: readState(msg, provider),
-          flagged: parseList(msg.flags).some(f => f === '\\Flagged' || f === 'STARRED'),
-          labels: parseList(msg.labels).filter(l => typeof l === 'string' && !/^(UNREAD|STARRED|IMPORTANT|CATEGORY_|INBOX$|SENT$|DRAFT$|SPAM$|TRASH$)/.test(l)),
-          sourceFolder: folderPath,
-          acquiredAt: msg.acquired_at,
-          internalDate: msg.internal_date,
-        });
+        const { spec, subject, messageId } = await mimeToMessage(bytes.content, writer, itemMeta(msg, provider, folderPath));
         const segments = [rootFolderName, ...folderPath.split('/').filter(Boolean)];
         writer.addMessage(writer.folder(segments), spec);
         const sha256 = crypto.createHash('sha256').update(bytes.content).digest('hex');

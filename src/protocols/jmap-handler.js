@@ -1,6 +1,10 @@
-import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getSession, getApiToken, getAuthStatus } from '../services/fastmail-auth.js';
+import { buildMessageRecord, withRetry } from '../services/collection-engine.js';
+
+const QUERY_PAGE = 256;
+const GET_BATCH = 100;
+const KEYWORD_FLAGS = { $seen: '\\Seen', $flagged: '\\Flagged', $answered: '\\Answered', $draft: '\\Draft' };
 
 export class JmapHandler {
   constructor(config) {
@@ -55,6 +59,7 @@ export class JmapHandler {
 
     const session = await getSession();
     this.apiUrl = session.apiUrl;
+    this.downloadUrl = session.downloadUrl;
     this.accountId = session.primaryAccounts['urn:ietf:params:jmap:mail'];
 
     const account = session.accounts[this.accountId];
@@ -126,12 +131,30 @@ export class JmapHandler {
     };
   }
 
+  // The raw RFC 5322 message the server stores is the email's blob (RFC 8621 section 4.1.1); it is
+  // downloaded byte for byte from the session's downloadUrl.
+  async downloadBlob(blobId) {
+    if (!this.downloadUrl) throw new Error('The JMAP session gave no downloadUrl, so the raw message cannot be fetched');
+    const url = this.downloadUrl
+      .replace('{accountId}', encodeURIComponent(this.accountId))
+      .replace('{blobId}', encodeURIComponent(blobId))
+      .replace('{name}', 'message.eml')
+      .replace('{type}', encodeURIComponent('message/rfc822'));
+    const res = await fetch(url, { headers: { Authorization: `Bearer ${this.apiToken}` }, signal: AbortSignal.timeout(120000) });
+    if (!res.ok) {
+      const err = new Error(`Raw message download failed (HTTP ${res.status})`);
+      if (res.status === 404) err.permanent = true;
+      throw err;
+    }
+    return Buffer.from(await res.arrayBuffer());
+  }
+
+  // Every email in the mailbox (or the first `limit`), each built from its raw message. An email whose
+  // raw message cannot be downloaded is returned with fetchError and no content; nothing is made up.
   async fetchMessages(folderIdOrPath, { limit } = {}) {
     const mailboxId = typeof folderIdOrPath === 'string'
       ? folderIdOrPath
       : folderIdOrPath.jmapMailboxId || folderIdOrPath.path || folderIdOrPath;
-
-    const top = limit || 25;
 
     let resolvedMailboxId = mailboxId;
     if (!mailboxId.startsWith('M') && !/^[a-f0-9-]+$/i.test(mailboxId)) {
@@ -144,63 +167,52 @@ export class JmapHandler {
       resolvedMailboxId = match.id;
     }
 
-    this.log('C→S', `POST ${this.apiUrl} — Email/query + Email/get`);
+    this.log('C→S', `POST ${this.apiUrl} — Email/query (paged) + Email/get + raw message downloads`);
 
-    const queryResponse = await this.jmapRequest([
-      ['Email/query', {
-        accountId: this.accountId,
-        filter: { inMailbox: resolvedMailboxId },
-        sort: [{ property: 'receivedAt', isAscending: false }],
-        limit: top,
-      }, '0'],
-    ]);
-
-    const ids = queryResponse.methodResponses[0][1].ids || [];
-    if (ids.length === 0) {
-      this.log('S→C', '200 OK - 0 messages in mailbox');
-      return [];
+    const ids = [];
+    for (let position = 0; ;) {
+      const queryResponse = await this.jmapRequest([
+        ['Email/query', {
+          accountId: this.accountId,
+          filter: { inMailbox: resolvedMailboxId },
+          sort: [{ property: 'receivedAt', isAscending: false }],
+          position,
+          limit: QUERY_PAGE,
+          calculateTotal: true,
+        }, '0'],
+      ]);
+      const result = queryResponse.methodResponses[0][1];
+      const page = result.ids || [];
+      ids.push(...page);
+      position += page.length;
+      if (!page.length || (result.total != null && position >= result.total) || (limit > 0 && ids.length >= limit)) break;
     }
-
-    const getResponse = await this.jmapRequest([
-      ['Email/get', {
-        accountId: this.accountId,
-        ids,
-        properties: ['id', 'subject', 'from', 'to', 'cc', 'bcc', 'receivedAt', 'size', 'hasAttachment', 'preview', 'bodyValues', 'textBody', 'headers'],
-        fetchTextBodyValues: true,
-      }, '0'],
-    ]);
-
-    const emails = getResponse.methodResponses[0][1].list || [];
-    this.log('S→C', `200 OK - ${emails.length} messages fetched`);
+    const selected = limit > 0 ? ids.slice(0, limit) : ids;
+    this.log('S→C', `200 OK - ${selected.length} message(s) listed`);
 
     const messages = [];
-    for (const email of emails) {
-      const bodyText = Object.values(email.bodyValues || {}).map(v => v.value).join('\n').substring(0, 1000);
-      const rawContent = `From: ${(email.from || []).map(a => a.email).join(', ')}\r\nTo: ${(email.to || []).map(a => a.email).join(', ')}\r\nSubject: ${email.subject || ''}\r\nDate: ${email.receivedAt || ''}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\n${bodyText}`;
-      const rawBuffer = Buffer.from(rawContent, 'utf8');
-
-      messages.push({
-        id: uuidv4(),
-        uid: messages.length + 1,
-        jmapId: email.id,
-        folder: folderIdOrPath,
-        subject: email.subject || '(no subject)',
-        fromAddress: (email.from || []).map(a => a.email).join(', '),
-        toAddresses: (email.to || []).map(a => a.email),
-        ccAddresses: (email.cc || []).map(a => a.email),
-        date: email.receivedAt || new Date().toISOString(),
-        size: email.size || rawBuffer.length,
-        hashMd5: crypto.createHash('md5').update(rawBuffer).digest('hex'),
-        hashSha256: crypto.createHash('sha256').update(rawBuffer).digest('hex'),
-        hashSha512: crypto.createHash('sha512').update(rawBuffer).digest('hex'),
-        hasAttachments: email.hasAttachment || false,
-        attachmentCount: 0,
-        bodyText,
-        contentType: 'text/plain',
-      });
+    for (let i = 0; i < selected.length; i += GET_BATCH) {
+      const getResponse = await this.jmapRequest([
+        ['Email/get', {
+          accountId: this.accountId,
+          ids: selected.slice(i, i + GET_BATCH),
+          properties: ['id', 'blobId', 'receivedAt', 'size', 'keywords'],
+        }, '0'],
+      ]);
+      for (const email of getResponse.methodResponses[0][1].list || []) {
+        const uid = messages.length + 1;
+        const flags = Object.keys(email.keywords || {}).filter(k => email.keywords[k]).map(k => KEYWORD_FLAGS[k] || k);
+        try {
+          const raw = await withRetry(() => this.downloadBlob(email.blobId), { attempts: 3 });
+          const record = await buildMessageRecord(raw, { uid, serviceId: email.id, folder: folderIdOrPath, flags, internalDate: email.receivedAt || null });
+          messages.push({ ...record, jmapId: email.id });
+        } catch (err) {
+          messages.push({ id: uuidv4(), uid, jmapId: email.id, serviceId: email.id, folder: folderIdOrPath, fetchError: err.message });
+        }
+      }
     }
 
-    this.log('CLIENT', `Fetched ${messages.length} messages from mailbox via JMAP`);
+    this.log('CLIENT', `Fetched ${messages.filter(m => !m.fetchError).length} raw message(s) from mailbox via JMAP${messages.some(m => m.fetchError) ? `; ${messages.filter(m => m.fetchError).length} could not be downloaded` : ''}`);
     return messages;
   }
 

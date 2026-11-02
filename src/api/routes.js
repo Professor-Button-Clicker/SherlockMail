@@ -251,25 +251,29 @@ function writeEmlFile(mimeDir, folderName, msg, folderMsgIndex, maxPerSubfolder 
   const filename = `${uid}_${safeSubject}.eml`;
   const filePath = path.join(targetDir, filename);
 
+  // Evidence is only ever the bytes the server returned; a message without them is not written.
   let rawBuffer;
   if (msg.rawMime && Buffer.isBuffer(msg.rawMime)) {
     rawBuffer = msg.rawMime;
   } else if (msg.rawSource) {
     rawBuffer = Buffer.from(msg.rawSource, 'base64');
   } else {
-    const headers = [
-      `From: ${msg.fromAddress || ''}`,
-      `To: ${(msg.toAddresses || []).join(', ')}`,
-      `Subject: ${msg.subject || ''}`,
-      `Date: ${msg.date || new Date().toISOString()}`,
-      `Message-ID: ${msg.messageId || ''}`,
-      `Content-Type: ${msg.contentType || 'text/plain'}`,
-    ].join('\r\n');
-    rawBuffer = Buffer.from(headers + '\r\n\r\n' + (msg.bodyText || ''));
+    throw new Error('The server returned no raw message (MIME); nothing was saved for this item');
   }
 
   fs.writeFileSync(filePath, rawBuffer);
+  verifyWrittenEml(filePath, msg.hashSha256);
   return { filePath, size: rawBuffer.length };
+}
+
+// The EML on disk must hold exactly the collected bytes. A file that does not is removed and the item
+// fails, rather than leaving a copy that does not match its recorded hash.
+function verifyWrittenEml(filePath, expectedSha256, onDisk = fs.readFileSync(filePath)) {
+  const actual = crypto.createHash('sha256').update(onDisk).digest('hex');
+  if (expectedSha256 && actual !== expectedSha256) {
+    try { fs.unlinkSync(filePath); } catch {}
+    throw new Error(`EML written to disk does not match the collected bytes (SHA-256 ${actual} vs ${expectedSha256}); the file was removed and the item not collected`);
+  }
 }
 
 function emlTargetPath(mimeDir, folderName, msg, folderMsgIndex, maxPerSubfolder = 5000) {
@@ -1133,6 +1137,7 @@ function createCollectionSink({
       msg.emlPath = alt;
     });
     msg.emlPath = msg.emlPath || filePath;
+    verifyWrittenEml(msg.emlPath, msg.hashSha256, await fs.promises.readFile(msg.emlPath));
     if (attachmentLog) await saveAttachmentFiles(msg, msg.rawMime, attachmentLog);
     for (const att of msg.attachments || []) delete att.content;
     delete msg.rawMime;
@@ -1450,9 +1455,19 @@ async function runCollectionJob(ctx) {
         try {
           const messages = await retryWithBackoff(() => handler.fetchMessages(folder, { limit }));
           progress.total += messages.length;
+          const fromJson = messages.filter(m => m.rawFromJson).length;
+          if (fromJson) live.write(`Note: ${fromJson} message(s) in ${folder} arrived from the server as JSON text; 8-bit content that was not UTF-8 cannot be byte-identical to the server's copy`);
           for (const msg of messages) {
             if (signal.aborted) break;
             msg.folder = msg.folder || folder;
+            // The raw message could not be downloaded: a failure, never a record rebuilt from metadata.
+            if (msg.fetchError) {
+              stats.failed++;
+              progress.failed++;
+              errors.push({ folder, uid: msg.uid, messageId: msg.serviceId || null, error: msg.fetchError, timestamp: new Date().toISOString(), type: 'message_fetch_error' });
+              live.write(`Item failed (fetch): ${folder} #${msg.uid}: ${msg.fetchError}`);
+              continue;
+            }
             if (queryPlan.localKeys.length) {
               const { match, failed } = matchesLocally(msg, query, queryPlan.localKeys, protocol);
               if (!match) {
@@ -1702,8 +1717,10 @@ async function runCollectionJob(ctx) {
             onProgress: format === 'pst' ? (done, total) => { progress.statusDetail = `Exporting PST: ${done} of ${total}`; publish(); } : undefined,
             label: `Automatic export after acquisition ${acquisitionId}`,
           });
-          exports.push({ format, success: true, files: r.files.length, totalBytes: r.totalBytes, outputDir: r.outputDir, reconstructed: r.reconstructedCount });
+          exports.push({ format, success: true, files: r.files.length, totalBytes: r.totalBytes, outputDir: r.outputDir, reconstructed: r.reconstructedCount, failed: r.failedCount, verificationFailures: r.verificationFailures.length });
           live.write(`Exported ${format.toUpperCase()}: ${r.files.length} file(s) to ${r.outputDir}`);
+          for (const f of r.failed) live.write(`  Not exported to ${format.toUpperCase()}: ${f.folder} | ${f.subject} | ${f.error}`);
+          for (const v of r.verificationFailures) live.write(`  ${format.toUpperCase()} file failed read-back verification: ${v.file}: ${v.error}`);
         } catch (exportErr) {
           exports.push({ format, success: false, error: exportErr.message });
           live.write(`Export ${format.toUpperCase()} failed: ${exportErr.message}`);
@@ -2631,7 +2648,7 @@ async function performExport(project, { format, outputDir: customOutputDir, pdfS
   const options = { provider: project.provider_type || 'Unknown', preserveFolders, project, acquisition: acquisitions[0] || {} };
   if (pdfSplitMode) options.pdfSplitMode = pdfSplitMode;
   if (format === 'pst') { options.pstMaxGb = pstSizeGb(pstMaxGb); options.onProgress = onProgress; }
-  const { files, manifest, outputDir, reconstructed } = await ExportService.exportToFiles(project.id, exportId, format, messages, folders, customOutputDir, options);
+  const { files, manifest, outputDir, reconstructed, failed = [], verificationFailures = [] } = await ExportService.exportToFiles(project.id, exportId, format, messages, folders, customOutputDir, options);
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
 
   saveExportRecord(project.id, format, outputDir, messages.length, totalBytes, manifest.manifestHash);
@@ -2640,11 +2657,12 @@ async function performExport(project, { format, outputDir: customOutputDir, pdfS
   const tsResult = TimestampService.timestampExport(project.id, exportId, manifest);
   saveTimestampRecord(project.id, 'export', manifest.manifestHash, tsResult.timestamp);
 
-  addAuditEntry(project.id, 'EXPORT_COMPLETED', `${label ? `${label}: ` : ''}Exported ${messages.length} messages to ${format.toUpperCase()}${reconstructed?.length ? ` (${reconstructed.length} reconstructed: original file missing or altered)` : ''}`, {
+  addAuditEntry(project.id, 'EXPORT_COMPLETED', `${label ? `${label}: ` : ''}Exported ${messages.length - failed.length} of ${messages.length} messages to ${format.toUpperCase()}${reconstructed?.length ? ` (${reconstructed.length} reconstructed: original file missing or altered)` : ''}${failed.length ? `; ${failed.length} not exported (see export_failed_items.csv)` : ''}${verificationFailures.length ? `; ${verificationFailures.length} file(s) FAILED read-back verification` : ''}`, {
     exportId, format, outputDir, messageCount: messages.length, totalBytes,
     manifestHash: manifest.manifestHash,
     reconstructed: reconstructed || [],
-    fileHashes: files.map(f => ({ filename: f.filename, sha256: f.hash })),
+    failed, verificationFailures,
+    fileHashes: files.map(f => ({ filename: f.relativePath || f.filename, md5: f.md5, sha1: f.sha1, sha256: f.hash })),
     timestamp: tsResult.timestamp.genTime,
   }, project.examiner_name);
 
@@ -2662,6 +2680,9 @@ async function performExport(project, { format, outputDir: customOutputDir, pdfS
     totalBytes,
     outputDir,
     reconstructedCount: reconstructed?.length || 0,
+    failedCount: failed.length,
+    failed: failed.slice(0, 100),
+    verificationFailures,
     timestamp: tsResult.timestamp,
   };
 }
