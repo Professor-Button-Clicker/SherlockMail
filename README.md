@@ -1,4 +1,4 @@
-# SherlockMail
+# SherlockMail*
 
 **v0.9.0** | Desktop forensic email collection for digital forensic and incident response (DFIR) investigations.
 
