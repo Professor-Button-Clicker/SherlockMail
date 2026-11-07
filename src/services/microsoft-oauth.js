@@ -75,7 +75,11 @@ export function getAuthStatus() {
   };
 }
 
-export function getAuthUrl() {
+const FEATURE_SCOPES = { contacts: 'Contacts.Read', sharepoint: 'Sites.Read.All' };
+let requestedScopes = SCOPES;
+
+export function getAuthUrl(features = []) {
+  requestedScopes = [...SCOPES, ...features.map(f => FEATURE_SCOPES[f]).filter(Boolean)];
   const creds = loadCredentials();
   if (!creds || !creds.client_id) return null;
 
@@ -84,7 +88,7 @@ export function getAuthUrl() {
     client_id: creds.client_id,
     response_type: 'code',
     redirect_uri: REDIRECT_URI,
-    scope: SCOPES.join(' '),
+    scope: requestedScopes.join(' '),
     response_mode: 'query',
     state,
     prompt: 'consent',
@@ -103,7 +107,7 @@ async function exchangeCodeForTokens(code) {
     code,
     redirect_uri: REDIRECT_URI,
     grant_type: 'authorization_code',
-    scope: SCOPES.join(' '),
+    scope: requestedScopes.join(' '),
   });
 
   const res = await fetch(`${AUTH_BASE}/token`, {
@@ -139,7 +143,7 @@ export async function refreshAccessToken() {
     client_secret: creds.client_secret,
     refresh_token: tokens.refresh_token,
     grant_type: 'refresh_token',
-    scope: SCOPES.join(' '),
+    scope: tokens.scope || requestedScopes.join(' '),
   });
 
   const res = await fetch(`${AUTH_BASE}/token`, {

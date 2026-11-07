@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import { simpleParser } from 'mailparser';
+import { ExportService } from './export-service.js';
 
 const TIMESTAMP_CHECK_CONCURRENCY = 32;
 const HEADER_READ_BYTES = 256 * 1024;
@@ -101,9 +102,9 @@ export class QualityControlService {
       ['Required Fields', () => this.checkMissingFields(messages)],
       ['Folder Coverage', () => this.checkFolderCoverage(messages, acquisitions)],
       ['Export Completeness', () => this.checkExportCompleteness(messages, exports)],
-      ['Audit Trail', () => this.checkAuditTrail(project)],
+      ['Audit Trail', () => this.checkAuditTrail(project, options.auditChain)],
       ['Encryption & Signing Detection', () => this.checkEncryptionDetection(messages)],
-      ['Write Protection (ISO 27037)', () => this.checkWriteProtection(project)],
+      ['Write Protection (ISO 27037)', () => this.checkWriteProtection(project, acquisitions)],
       ['DFIR Standards Compliance', () => this.checkStandardsCompliance(project, messages, acquisitions)],
       ['Attachment Completeness', () => this.checkAttachmentCompleteness(messages, options.attachments || [])],
       ['Timestamp Verification', () => this.checkTimestampVerification(messages)],
@@ -362,31 +363,38 @@ export class QualityControlService {
       return { ...check, status: 'warning', detail: 'No exports performed yet', metrics: { exports: 0 } };
     }
 
-    const totalExported = exports.reduce((s, e) => s + (e.message_count || 0), 0);
-    check.metrics = { exports: exports.length, totalExported, collected: messages.length };
+    // Formats are alternatives, so counts are not added up: the best single export is what covers the evidence.
+    const byFormat = {};
+    for (const e of exports) byFormat[e.format] = Math.max(byFormat[e.format] || 0, e.message_count || 0);
+    const best = Math.max(...Object.values(byFormat));
+    check.metrics = { exports: exports.length, byFormat, bestExport: best, collected: messages.length };
 
-    if (totalExported >= messages.length) {
+    if (best >= messages.length) {
       check.status = 'pass';
-      check.detail = `${totalExported} messages exported across ${exports.length} export(s)`;
+      check.detail = `All ${messages.length} messages exported (${Object.entries(byFormat).filter(([, n]) => n >= messages.length).map(([f]) => f.toUpperCase()).join(', ')})`;
     } else {
       check.status = 'warning';
-      check.detail = `Only ${totalExported} of ${messages.length} messages exported`;
+      check.detail = `No export covers everything: at most ${best} of ${messages.length} messages in one export`;
     }
     return check;
   }
 
-  static checkAuditTrail(project) {
+  static checkAuditTrail(project, chain) {
     const check = { name: 'Audit Trail', category: 'forensic' };
+    if (chain) check.metrics = { entries: chain.entries, breaks: chain.breaks.length, legacyCrossProjectLinks: chain.legacyCrossProjectLinks };
 
-    if (!project.examiner_name) {
-      return { ...check, status: 'warning', detail: 'No examiner name recorded for chain of custody' };
+    if (!chain) return { ...check, status: 'warning', detail: 'The audit log was not available to check' };
+    if (!chain.valid) {
+      check.status = 'fail';
+      check.detail = `The hash chain is broken at ${chain.breaks.length} of ${chain.entries} entries: ${chain.breaks[0].problem}`;
+      check.breaks = chain.breaks.slice(0, 25);
+      return check;
     }
-    if (!project.legal_authority) {
-      return { ...check, status: 'warning', detail: 'No legal authority documented' };
-    }
-
+    const intact = `Hash chain intact over ${chain.entries} entries`;
+    if (!project.examiner_name) return { ...check, status: 'warning', detail: `${intact}, but no examiner name is recorded` };
+    if (!project.legal_authority) return { ...check, status: 'warning', detail: `${intact}, but no legal authority is documented` };
     check.status = 'pass';
-    check.detail = `Examiner: ${project.examiner_name}, Authority: ${project.legal_authority}`;
+    check.detail = `${intact}. Examiner: ${project.examiner_name}, Authority: ${project.legal_authority}`;
     return check;
   }
 
@@ -405,35 +413,39 @@ export class QualityControlService {
     check.metrics = { encrypted, signed, smimeDetected, total: messages.length };
     check.status = encrypted > 0 ? 'warning' : 'pass';
     check.detail = encrypted > 0
-      ? `${encrypted} encrypted, ${signed} signed message(s) — encrypted content may not be fully preserved`
+      ? `${encrypted} encrypted, ${signed} signed message(s). Encrypted messages are preserved as received; their content cannot be read or searched until decrypted`
       : `${signed} signed message(s) detected, no encrypted messages`;
     return check;
   }
 
-  static checkWriteProtection(project) {
+  // Judged from what each acquisition actually did, using its protocol log where the protocol records it.
+  static checkWriteProtection(project, acquisitions = []) {
     const check = { name: 'Write Protection (ISO 27037)', category: 'forensic' };
-    const protocol = project.provider_type || '';
-    const readOnlyProtocols = ['imap', 'gmail_api', 'graph', 'zoho_api', 'jmap'];
-    const isReadOnly = readOnlyProtocols.includes(protocol);
+    const protocolOf = a => a.protocol || project.provider_type;
+    const protocols = [...new Set(acquisitions.map(protocolOf).filter(Boolean))];
+    check.metrics = { protocols };
+    if (!protocols.length) return { ...check, status: 'warning', detail: 'No acquisition to judge: nothing has been collected yet' };
 
-    check.metrics = { protocol, readOnlyAccess: isReadOnly };
-
-    if (protocol === 'imap') {
-      check.status = 'pass';
-      check.detail = 'IMAP EXAMINE mode provides read-only access (ISO 27037 / ACPO Principle 1)';
-    } else if (isReadOnly) {
-      check.status = 'pass';
-      check.detail = `${protocol.toUpperCase()} API uses read-only scopes — no write operations performed`;
-    } else if (protocol === 'pop3') {
-      check.status = 'warning';
-      check.detail = 'POP3 RETR may cause message deletion on some servers — document server behavior per SWGDE guidelines';
-    } else if (protocol === 'ews') {
-      check.status = 'pass';
-      check.detail = 'EWS read operations do not modify mailbox content';
-    } else {
-      check.status = 'warning';
-      check.detail = 'Unknown protocol — verify that collection did not alter source data';
+    const notes = [];
+    const warnings = [];
+    for (const protocol of protocols) {
+      if (protocol === 'imap') {
+        const collected = acquisitions.filter(a => protocolOf(a) === 'imap' && (a.acquired_messages || 0) > 0);
+        const missing = collected.filter(a => !(parseJson(a.protocol_log, []) || []).some(e => /EXAMINE/.test(e.message || ''))).length;
+        if (missing) warnings.push(`${missing} IMAP acquisition(s) have no EXAMINE in their protocol log (made before this was recorded, or with no folder opened)`);
+        else notes.push('IMAP opened every folder with EXAMINE, and the server confirmed read-only');
+      } else if (protocol === 'pop3') {
+        warnings.push('POP3 has no read-only mode. SherlockMail never sends DELE, but some servers delete or hide mail after RETR: check this server\'s behaviour and record it');
+      } else if (protocol === 'import') {
+        notes.push('Imported files were only read; their hashes were taken before and after');
+      } else if (['gmail_api', 'graph', 'ews', 'zoho_api', 'jmap'].includes(protocol)) {
+        notes.push(`${protocol.toUpperCase()} used read requests only`);
+      } else {
+        warnings.push(`Unknown protocol ${protocol}: verify that collection did not alter the source`);
+      }
     }
+    check.status = warnings.length ? 'warning' : 'pass';
+    check.detail = [...warnings, ...notes].join('. ');
     return check;
   }
 
@@ -610,32 +622,37 @@ export class QualityControlService {
     return check;
   }
 
-  static checkExportIntegrity(exports) {
+  // Re-hashes every file each export's manifest lists.
+  static async checkExportIntegrity(exports) {
     const check = { name: 'Export Integrity', category: 'export' };
 
     if (!exports || exports.length === 0) {
       return { ...check, status: 'warning', detail: 'No exports performed', metrics: { count: 0 } };
     }
 
-    let withHash = 0;
-    let failedExports = 0;
-
+    let verified = 0;
+    let filesChecked = 0;
+    const problems = [];
     for (const exp of exports) {
-      if (exp.hash_sha256 || exp.hashSha256) withHash++;
-      if (exp.status === 'failed') failedExports++;
+      const result = exp.output_dir && fs.existsSync(exp.output_dir)
+        ? await ExportService.verifyExport(exp.output_dir)
+        : { valid: false, error: 'Export folder not found' };
+      filesChecked += result.totalFiles || 0;
+      if (result.valid) verified++;
+      else {
+        const bad = (result.details || []).filter(d => d.status !== 'verified').slice(0, 5).map(d => `${d.filename}: ${d.status}`);
+        problems.push(`${String(exp.format).toUpperCase()} at ${exp.output_dir}: ${result.error || bad.join(', ')}`);
+      }
     }
+    check.metrics = { total: exports.length, verified, filesChecked, failed: problems.length };
 
-    check.metrics = { total: exports.length, withHash, failed: failedExports };
-
-    if (failedExports > 0) {
+    if (problems.length) {
       check.status = 'fail';
-      check.detail = `${failedExports} export(s) failed — re-export required`;
-    } else if (withHash === exports.length) {
-      check.status = 'pass';
-      check.detail = `All ${exports.length} export(s) have verified SHA-256 manifest hashes`;
+      check.detail = `${problems.length} of ${exports.length} export(s) no longer match their manifest. ${problems.slice(0, 3).join('; ')}`;
+      check.problems = problems.slice(0, 25);
     } else {
-      check.status = 'warning';
-      check.detail = `${exports.length - withHash} export(s) missing manifest hash — integrity cannot be verified`;
+      check.status = 'pass';
+      check.detail = `All ${exports.length} export(s) re-hashed: ${filesChecked} file(s) match their manifests`;
     }
     return check;
   }

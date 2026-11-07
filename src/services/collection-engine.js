@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { simpleParser } from 'mailparser';
 import { v4 as uuidv4 } from 'uuid';
+import { protectionFlags } from './crypto-service.js';
 
 // Per-protocol throughput settings. Limits follow each provider's documented ceilings:
 // Graph allows 4 concurrent requests per mailbox; Gmail allows 15,000 quota units per user per minute
@@ -242,11 +243,13 @@ export async function buildMessageRecord(raw, extra = {}) {
     toAddresses: addressList(parsed?.to),
     ccAddresses: addressList(parsed?.cc),
     bccAddresses: addressList(parsed?.bcc),
-    date: isoOrNull(parsed?.date) || isoOrNull(extra.internalDate) || new Date().toISOString(),
+    // A message with no usable date stays without one: the time of collection is not the message's date.
+    date: isoOrNull(parsed?.date) || isoOrNull(extra.internalDate),
     messageId: parsed?.messageId || null,
     inReplyTo: parsed?.inReplyTo || null,
     size: raw.length,
     flags: [],
+    ...protectionFlags(raw),
     hasAttachments: attachments.length > 0,
     attachmentCount: attachments.length,
     contentType: parsed?.headers?.get('content-type')?.value || 'text/plain',

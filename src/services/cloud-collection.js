@@ -1,29 +1,40 @@
 import crypto from 'crypto';
-import https from 'https';
-import fs from 'fs';
-import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
-import { HashManager } from './hash-manager.js';
+
+// Listings of what an account holds in Google and Microsoft cloud services. Every call follows the provider's
+// paging to the end, so a count here is the whole folder, not the first page. Files are downloaded by the
+// Drive/OneDrive collection (drive-collector.js), which also verifies them.
+
+const GRAPH = process.env.SHERLOCKMAIL_GRAPH_URL || 'https://graph.microsoft.com/v1.0';
+const GOOGLE_ROOT = (process.env.SHERLOCKMAIL_GOOGLE_API_URL || 'https://www.googleapis.com/').replace(/\/$/, '');
+const PEOPLE_ROOT = process.env.SHERLOCKMAIL_GOOGLE_API_URL ? GOOGLE_ROOT : 'https://people.googleapis.com';
+const REQUEST_TIMEOUT_MS = 120000;
+
+function sha256Json(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+}
+
+function encodeId(id) {
+  return encodeURIComponent(id);
+}
 
 export class CloudCollectionService {
 
   // ── Google Drive ──
 
   static async listGoogleDriveItems(accessToken, options = {}) {
-    const query = options.query || "'root' in parents and trashed=false";
-    const fields = 'files(id,name,mimeType,size,createdTime,modifiedTime,owners,shared,webViewLink,parents),nextPageToken';
-    let url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=${encodeURIComponent(fields)}&pageSize=100`;
-    if (options.pageToken) url += `&pageToken=${options.pageToken}`;
-
-    const data = await this._apiGet(url, accessToken);
+    const query = options.query || 'trashed=false';
+    const fields = 'files(id,name,mimeType,size,createdTime,modifiedTime,owners,shared,webViewLink,parents,md5Checksum,sha256Checksum),nextPageToken';
+    const url = `${GOOGLE_ROOT}/drive/v3/files?q=${encodeURIComponent(query)}&fields=${encodeURIComponent(fields)}&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true`;
+    const files = await this._allGooglePages(url, accessToken, 'files');
     return {
-      items: (data.files || []).map(f => ({
+      items: files.map(f => ({
         id: uuidv4(),
         provider: 'google_drive',
         itemType: f.mimeType === 'application/vnd.google-apps.folder' ? 'folder' : 'file',
         name: f.name,
         mimeType: f.mimeType,
-        size: parseInt(f.size) || 0,
+        size: parseInt(f.size, 10) || 0,
         remoteId: f.id,
         parentId: f.parents?.[0] || null,
         webUrl: f.webViewLink,
@@ -32,95 +43,59 @@ export class CloudCollectionService {
         owner: f.owners?.[0]?.emailAddress || null,
         shared: !!f.shared,
       })),
-      nextPageToken: data.nextPageToken || null,
     };
   }
 
   static async getGoogleDriveRevisions(accessToken, fileId) {
-    const url = `https://www.googleapis.com/drive/v3/files/${fileId}/revisions?fields=revisions(id,modifiedTime,lastModifyingUser,size)`;
-    const data = await this._apiGet(url, accessToken);
-    return (data.revisions || []).map(r => ({
+    const fields = encodeURIComponent('revisions(id,modifiedTime,lastModifyingUser,size,md5Checksum),nextPageToken');
+    const revisions = await this._allGooglePages(`${GOOGLE_ROOT}/drive/v3/files/${encodeId(fileId)}/revisions?fields=${fields}&pageSize=200`, accessToken, 'revisions');
+    return revisions.map(r => ({
       id: uuidv4(),
       revisionId: r.id,
       modifiedTime: r.modifiedTime,
       modifier: r.lastModifyingUser?.emailAddress || null,
-      size: parseInt(r.size) || 0,
+      size: parseInt(r.size, 10) || 0,
+      md5: r.md5Checksum || null,
     }));
-  }
-
-  static async downloadGoogleDriveFile(accessToken, fileId, outputPath) {
-    const url = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
-    return this._downloadFile(url, accessToken, outputPath);
   }
 
   static async listGoogleSharedDrives(accessToken) {
-    const url = 'https://www.googleapis.com/drive/v3/drives?pageSize=100';
-    const data = await this._apiGet(url, accessToken);
-    return (data.drives || []).map(d => ({
-      id: uuidv4(),
-      provider: 'google_drive',
-      itemType: 'shared_drive',
-      name: d.name,
-      remoteId: d.id,
-    }));
+    const drives = await this._allGooglePages(`${GOOGLE_ROOT}/drive/v3/drives?pageSize=100`, accessToken, 'drives');
+    return drives.map(d => ({ id: uuidv4(), provider: 'google_drive', itemType: 'shared_drive', name: d.name, remoteId: d.id }));
   }
 
   // ── OneDrive ──
 
   static async listOneDriveItems(accessToken, options = {}) {
-    const userId = options.userId || 'me';
-    const folderId = options.folderId || 'root';
-    const url = `https://graph.microsoft.com/v1.0/${userId === 'me' ? 'me' : `users/${userId}`}/drive/items/${folderId}/children?$top=100`;
-
-    const data = await this._apiGet(url, accessToken);
-    return {
-      items: (data.value || []).map(item => ({
-        id: uuidv4(),
-        provider: 'onedrive',
-        itemType: item.folder ? 'folder' : 'file',
-        name: item.name,
-        mimeType: item.file?.mimeType || null,
-        size: item.size || 0,
-        remoteId: item.id,
-        parentId: item.parentReference?.id || null,
-        path: item.parentReference?.path || null,
-        webUrl: item.webUrl,
-        createdTime: item.createdDateTime,
-        modifiedTime: item.lastModifiedDateTime,
-        owner: item.createdBy?.user?.email || null,
-        shared: !!item.shared,
-      })),
-      nextLink: data['@odata.nextLink'] || null,
+    const base = this._graphUser(options.userId);
+    const items = [];
+    const walk = async (folderId, parentPath) => {
+      const rows = await this._allGraphPages(`${GRAPH}${base}/drive/items/${encodeId(folderId)}/children?$top=200`, accessToken);
+      for (const item of rows) {
+        items.push(this._driveItem(item, 'onedrive', parentPath));
+        if (item.folder && options.recursive !== 'false') await walk(item.id, `${parentPath}/${item.name}`);
+      }
     };
+    await walk(options.folderId || 'root', '');
+    return { items };
   }
 
   static async getOneDriveRevisions(accessToken, itemId, userId) {
-    const base = userId && userId !== 'me' ? `users/${userId}` : 'me';
-    const url = `https://graph.microsoft.com/v1.0/${base}/drive/items/${itemId}/versions`;
-    const data = await this._apiGet(url, accessToken);
-    return (data.value || []).map(v => ({
+    const rows = await this._allGraphPages(`${GRAPH}${this._graphUser(userId)}/drive/items/${encodeId(itemId)}/versions`, accessToken);
+    return rows.map(v => ({
       id: uuidv4(),
       revisionId: v.id,
       modifiedTime: v.lastModifiedDateTime,
-      modifier: v.lastModifiedBy?.user?.email || null,
+      modifier: v.lastModifiedBy?.user?.email || v.lastModifiedBy?.user?.displayName || null,
       size: v.size || 0,
     }));
-  }
-
-  static async downloadOneDriveFile(accessToken, itemId, outputPath, userId) {
-    const base = userId && userId !== 'me' ? `users/${userId}` : 'me';
-    const url = `https://graph.microsoft.com/v1.0/${base}/drive/items/${itemId}/content`;
-    return this._downloadFile(url, accessToken, outputPath);
   }
 
   // ── SharePoint ──
 
   static async listSharePointSites(accessToken, searchQuery) {
-    const url = searchQuery
-      ? `https://graph.microsoft.com/v1.0/sites?search=${encodeURIComponent(searchQuery)}`
-      : 'https://graph.microsoft.com/v1.0/sites?search=*';
-    const data = await this._apiGet(url, accessToken);
-    return (data.value || []).map(s => ({
+    const rows = await this._allGraphPages(`${GRAPH}/sites?search=${encodeURIComponent(searchQuery || '*')}`, accessToken);
+    return rows.map(s => ({
       id: uuidv4(),
       provider: 'sharepoint',
       itemType: 'site',
@@ -132,37 +107,31 @@ export class CloudCollectionService {
   }
 
   static async listSharePointDocuments(accessToken, siteId, options = {}) {
-    const driveId = options.driveId;
-    const url = driveId
-      ? `https://graph.microsoft.com/v1.0/sites/${siteId}/drives/${driveId}/root/children`
-      : `https://graph.microsoft.com/v1.0/sites/${siteId}/drive/root/children`;
-    const data = await this._apiGet(url, accessToken);
-    return (data.value || []).map(item => ({
-      id: uuidv4(),
-      provider: 'sharepoint',
-      itemType: item.folder ? 'folder' : 'file',
-      name: item.name,
-      mimeType: item.file?.mimeType || null,
-      size: item.size || 0,
-      remoteId: item.id,
-      webUrl: item.webUrl,
-      createdTime: item.createdDateTime,
-      modifiedTime: item.lastModifiedDateTime,
-    }));
+    const root = options.driveId
+      ? `${GRAPH}/sites/${encodeId(siteId)}/drives/${encodeId(options.driveId)}`
+      : `${GRAPH}/sites/${encodeId(siteId)}/drive`;
+    const items = [];
+    const walk = async (url, parentPath) => {
+      for (const item of await this._allGraphPages(url, accessToken)) {
+        items.push(this._driveItem(item, 'sharepoint', parentPath));
+        if (item.folder) await walk(`${root}/items/${encodeId(item.id)}/children`, `${parentPath}/${item.name}`);
+      }
+    };
+    await walk(`${root}/root/children`, '');
+    return items;
   }
 
   // ── Google Calendar ──
 
   static async listGoogleCalendarEvents(accessToken, options = {}) {
     const calendarId = options.calendarId || 'primary';
-    let url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?maxResults=250&singleEvents=true&orderBy=startTime`;
+    let url = `${GOOGLE_ROOT}/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events?maxResults=2500&singleEvents=true&orderBy=startTime&showDeleted=true`;
     if (options.timeMin) url += `&timeMin=${encodeURIComponent(options.timeMin)}`;
     if (options.timeMax) url += `&timeMax=${encodeURIComponent(options.timeMax)}`;
-    if (options.pageToken) url += `&pageToken=${options.pageToken}`;
-
-    const data = await this._apiGet(url, accessToken);
+    const events = await this._allGooglePages(url, accessToken, 'items');
     return {
-      events: (data.items || []).map(e => ({
+      raw: events,
+      events: events.map(e => ({
         id: uuidv4(),
         provider: 'google',
         eventId: e.id,
@@ -175,21 +144,19 @@ export class CloudCollectionService {
         attendees: (e.attendees || []).map(a => ({ email: a.email, status: a.responseStatus })),
         recurrence: e.recurrence?.join('; ') || null,
         status: e.status,
-        hashSha256: crypto.createHash('sha256').update(JSON.stringify(e)).digest('hex'),
+        hashSha256: sha256Json(e),
       })),
-      nextPageToken: data.nextPageToken || null,
     };
   }
 
-  // ── Google Contacts ──
+  // ── Contacts ──
 
-  static async listGoogleContacts(accessToken, options = {}) {
-    let url = 'https://people.googleapis.com/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations&pageSize=100';
-    if (options.pageToken) url += `&pageToken=${options.pageToken}`;
-
-    const data = await this._apiGet(url, accessToken);
+  static async listGoogleContacts(accessToken) {
+    const url = `${PEOPLE_ROOT}/v1/people/me/connections?personFields=names,emailAddresses,phoneNumbers,organizations,biographies&pageSize=1000`;
+    const people = await this._allGooglePages(url, accessToken, 'connections');
     return {
-      contacts: (data.connections || []).map(p => ({
+      raw: people,
+      contacts: people.map(p => ({
         id: uuidv4(),
         provider: 'google',
         contactId: p.resourceName,
@@ -198,20 +165,16 @@ export class CloudCollectionService {
         phoneNumbers: (p.phoneNumbers || []).map(ph => ph.value),
         organization: p.organizations?.[0]?.name || null,
         title: p.organizations?.[0]?.title || null,
-        hashSha256: crypto.createHash('sha256').update(JSON.stringify(p)).digest('hex'),
+        hashSha256: sha256Json(p),
       })),
-      nextPageToken: data.nextPageToken || null,
     };
   }
 
-  // ── Microsoft Contacts ──
-
   static async listMicrosoftContacts(accessToken, options = {}) {
-    const userId = options.userId || 'me';
-    const url = `https://graph.microsoft.com/v1.0/${userId === 'me' ? 'me' : `users/${userId}`}/contacts?$top=100`;
-    const data = await this._apiGet(url, accessToken);
+    const rows = await this._allGraphPages(`${GRAPH}${this._graphUser(options.userId)}/contacts?$top=200`, accessToken);
     return {
-      contacts: (data.value || []).map(c => ({
+      raw: rows,
+      contacts: rows.map(c => ({
         id: uuidv4(),
         provider: 'microsoft',
         contactId: c.id,
@@ -220,57 +183,70 @@ export class CloudCollectionService {
         phoneNumbers: [c.mobilePhone, ...(c.businessPhones || []), ...(c.homePhones || [])].filter(Boolean),
         organization: c.companyName || null,
         title: c.jobTitle || null,
-        hashSha256: crypto.createHash('sha256').update(JSON.stringify(c)).digest('hex'),
+        hashSha256: sha256Json(c),
       })),
-      nextLink: data['@odata.nextLink'] || null,
     };
   }
 
   // ── Helpers ──
 
-  static async _apiGet(url, accessToken) {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      const req = https.request({
-        hostname: parsed.hostname, path: parsed.pathname + parsed.search,
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' },
-      }, (res) => {
-        const chunks = []; res.on('data', c => chunks.push(c));
-        res.on('end', () => {
-          const body = Buffer.concat(chunks).toString();
-          if (res.statusCode === 200) resolve(JSON.parse(body));
-          else reject(new Error(`API ${res.statusCode}: ${body.substring(0, 200)}`));
-        });
-      });
-      req.on('error', reject); req.end();
-    });
+  static _graphUser(userId) {
+    return userId && userId !== 'me' ? `/users/${encodeId(userId)}` : '/me';
   }
 
-  static async _downloadFile(url, accessToken, outputPath) {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      const req = https.request({
-        hostname: parsed.hostname, path: parsed.pathname + parsed.search,
-        method: 'GET',
-        headers: { 'Authorization': `Bearer ${accessToken}` },
-      }, (res) => {
-        if (res.statusCode === 302 || res.statusCode === 301) {
-          return this._downloadFile(res.headers.location, accessToken, outputPath).then(resolve).catch(reject);
-        }
-        fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-        const ws = fs.createWriteStream(outputPath);
-        const hasher = HashManager.computeStreaming(['md5', 'sha256']);
-        let totalBytes = 0;
-        res.on('data', chunk => { ws.write(chunk); hasher.update(chunk); totalBytes += chunk.length; });
-        res.on('end', () => {
-          ws.end();
-          const hashes = hasher.digest();
-          resolve({ outputPath, size: totalBytes, ...hashes });
-        });
-        res.on('error', reject);
-      });
-      req.on('error', reject); req.end();
+  static _driveItem(item, provider, parentPath) {
+    return {
+      id: uuidv4(),
+      provider,
+      itemType: item.folder ? 'folder' : 'file',
+      name: item.name,
+      mimeType: item.file?.mimeType || null,
+      size: item.size || 0,
+      remoteId: item.id,
+      parentId: item.parentReference?.id || null,
+      path: `${parentPath}/${item.name}`,
+      webUrl: item.webUrl,
+      createdTime: item.createdDateTime,
+      modifiedTime: item.lastModifiedDateTime,
+      owner: item.createdBy?.user?.email || null,
+      shared: !!item.shared,
+    };
+  }
+
+  static async _apiGet(url, accessToken) {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    const body = await res.text();
+    if (!res.ok) {
+      let message = body.slice(0, 300);
+      try { const j = JSON.parse(body); message = j.error?.message || message; } catch { /* the raw text is the message */ }
+      const err = new Error(`The service refused the request (HTTP ${res.status}): ${message}`);
+      err.status = res.status;
+      throw err;
+    }
+    return JSON.parse(body);
+  }
+
+  static async _allGooglePages(firstUrl, accessToken, listKey) {
+    const rows = [];
+    let pageToken = null;
+    do {
+      const data = await this._apiGet(pageToken ? `${firstUrl}&pageToken=${encodeURIComponent(pageToken)}` : firstUrl, accessToken);
+      rows.push(...(data[listKey] || []));
+      pageToken = data.nextPageToken || null;
+    } while (pageToken);
+    return rows;
+  }
+
+  static async _allGraphPages(firstUrl, accessToken) {
+    const rows = [];
+    for (let url = firstUrl; url;) {
+      const data = await this._apiGet(url, accessToken);
+      rows.push(...(data.value || []));
+      url = data['@odata.nextLink'] || null;
+    }
+    return rows;
   }
 }

@@ -41,6 +41,7 @@ export class CloudAttachmentService {
     return {
       totalLinks: allLinks.length,
       totalProviders,
+      messagesWithLinks: new Set(allLinks.map(l => l.messageId)).size,
       byProvider: stats,
       links: allLinks,
       forensicNote: allLinks.length > 0

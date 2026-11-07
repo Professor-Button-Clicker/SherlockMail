@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { getAccessToken, refreshAccessToken, getAuthStatus } from '../services/microsoft-oauth.js';
 
-const GRAPH_BASE = 'https://graph.microsoft.com/v1.0';
+const GRAPH_BASE = process.env.SHERLOCKMAIL_GRAPH_URL || 'https://graph.microsoft.com/v1.0';
 const TOKEN_REUSE_MS = 30000;
 const REQUEST_TIMEOUT_MS = 120000;
 const WELL_KNOWN_FOLDERS = {
@@ -17,6 +17,9 @@ export class GraphHandler {
     this.protocolLog = [];
     this.accessToken = null;
     this.userEmail = null;
+    this.base = config?.graphBase || GRAPH_BASE;
+    // App-only sign-ins have no "me": the mailbox is named.
+    this.me = config?.targetUser ? `/users/${encodeURIComponent(config.targetUser)}` : '/me';
   }
 
   log(direction, message) {
@@ -32,19 +35,20 @@ export class GraphHandler {
   getToken() {
     if (!this.tokenPromise || Date.now() - this.tokenFetchedAt > TOKEN_REUSE_MS) {
       this.tokenFetchedAt = Date.now();
-      this.tokenPromise = getAccessToken().catch(err => { this.tokenPromise = null; throw err; });
+      this.tokenPromise = (this.config?.tokenProvider ? this.config.tokenProvider() : getAccessToken()).catch(err => { this.tokenPromise = null; throw err; });
     }
     return this.tokenPromise;
   }
 
   forceTokenRefresh() {
     this.tokenFetchedAt = Date.now();
-    this.tokenPromise = refreshAccessToken().then(t => t.access_token).catch(err => { this.tokenPromise = null; throw err; });
+    const refreshed = this.config?.tokenProvider ? this.config.tokenProvider({ force: true }) : refreshAccessToken().then(t => t.access_token);
+    this.tokenPromise = refreshed.catch(err => { this.tokenPromise = null; throw err; });
     return this.tokenPromise;
   }
 
   async graphRequest(pathOrUrl, { raw = false, retriedAuth = false } = {}) {
-    const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${GRAPH_BASE}${pathOrUrl}`;
+    const url = pathOrUrl.startsWith('http') ? pathOrUrl : `${this.base}${pathOrUrl}`;
     const token = await this.getToken();
     const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
 
@@ -98,7 +102,7 @@ export class GraphHandler {
   async enumerate(folder, { limit, searchCriteria } = {}) {
     const folderId = await this.resolveFolderId(folder);
     const filter = searchCriteria?.filter ? `&$filter=${encodeURIComponent(searchCriteria.filter)}` : '';
-    const base = `/me/mailFolders/${folderId}/messages?$select=id,receivedDateTime&$top=1000${filter}`;
+    const base = `${this.me}/mailFolders/${folderId}/messages?$select=id,receivedDateTime&$top=1000${filter}`;
     // PR_MESSAGE_SIZE (0x0E08) gives each message's size so the ETA can be byte-based.
     const withSize = `${base}&$expand=${encodeURIComponent("singleValueExtendedProperties($filter=id eq 'Long 0x0E08')")}`;
     const list = async (firstUrl) => {
@@ -128,30 +132,32 @@ export class GraphHandler {
     const out = [];
     const emit = deliver || (item => out.push(item));
     for (const ref of refs) {
-      const raw = await this.graphRequest(`/me/messages/${ref.key}/$value`, { raw: true });
+      const raw = await this.graphRequest(`${this.me}/messages/${ref.key}/$value`, { raw: true });
       emit({ ref, raw, meta: { flags: [], internalDate: ref.receivedDateTime || null } });
     }
     return out;
   }
 
   async connect() {
-    const status = getAuthStatus();
-    if (!status.authorized) {
-      throw new Error('Microsoft account not authorized. Click "Authorize with Microsoft" first.');
+    if (!this.config?.tokenProvider) {
+      const status = getAuthStatus();
+      if (!status.authorized) {
+        throw new Error('Microsoft account not authorized. Click "Authorize with Microsoft" first.');
+      }
     }
 
     this.accessToken = await this.getToken();
 
     this.log('CLIENT', 'Connecting to Microsoft Graph API via OAuth2');
-    this.log('C→S', `GET ${GRAPH_BASE}/me`);
+    this.log('C→S', `GET ${this.base}/me`);
 
-    const profile = await this.graphFetch('/me');
+    const profile = await this.graphFetch(this.me);
     this.userEmail = profile.mail || profile.userPrincipalName;
 
     this.log('S→C', `200 OK - displayName: "${profile.displayName}", mail: "${this.userEmail}"`);
 
-    this.log('C→S', `GET ${GRAPH_BASE}/me/mailFolders?$top=1`);
-    await this.graphFetch('/me/mailFolders?$top=1&$select=id');
+    this.log('C→S', `GET ${this.base}/me/mailFolders?$top=1`);
+    await this.graphFetch(`${this.me}/mailFolders?$top=1&$select=id`);
     this.log('S→C', `200 OK - mail folders accessible`);
 
     return {
@@ -164,7 +170,7 @@ export class GraphHandler {
   }
 
   async listFolders() {
-    this.log('C→S', `GET ${GRAPH_BASE}/me/mailFolders (recursive)`);
+    this.log('C→S', `GET ${this.base}/me/mailFolders (recursive)`);
 
     const select = '$select=id,displayName,totalItemCount,unreadItemCount,childFolderCount&$top=250';
     const folders = [];
@@ -181,11 +187,11 @@ export class GraphHandler {
           parentPath: parentPath || undefined,
         });
         if (f.childFolderCount > 0) {
-          await walk(await this.listAllPages(`/me/mailFolders/${f.id}/childFolders?${select}`), folderPath);
+          await walk(await this.listAllPages(`${this.me}/mailFolders/${f.id}/childFolders?${select}`), folderPath);
         }
       }
     };
-    await walk(await this.listAllPages(`/me/mailFolders?${select}`), null);
+    await walk(await this.listAllPages(`${this.me}/mailFolders?${select}`), null);
 
     this.log('S→C', `200 OK - ${folders.length} mail folders returned`);
     return folders;
@@ -207,11 +213,11 @@ export class GraphHandler {
     if (filterParams.length) queryParts.push(`$filter=${filterParams.join(' and ')}`);
     queryParts.push('$top=50', '$select=id,subject,from,toRecipients,receivedDateTime,hasAttachments,bodyPreview');
 
-    const url = `/me/messages?${queryParts.join('&')}`;
-    this.log('C→S', `GET ${GRAPH_BASE}${url}`);
+    const url = `${this.me}/messages?${queryParts.join('&')}`;
+    this.log('C→S', `GET ${this.base}${url}`);
 
-    const data = await this.graphFetch(url);
-    const results = data.value || [];
+    // Every page: a count from the first page alone would understate the matches.
+    const results = await this.listAllPages(url);
 
     this.log('S→C', `200 OK - ${results.length} messages matched`);
 
@@ -234,7 +240,7 @@ export class GraphHandler {
     if (folderId.match(/^[A-Za-z0-9_=-]+$/)) {
       resolvedFolderId = folderId;
     } else {
-      const foldersData = await this.graphFetch('/me/mailFolders?$top=100');
+      const foldersData = await this.graphFetch(`${this.me}/mailFolders?$top=100`);
       const match = (foldersData.value || []).find(f => f.displayName === folderId);
       if (!match) throw new Error(`Folder "${folderId}" not found`);
       resolvedFolderId = match.id;
@@ -244,7 +250,7 @@ export class GraphHandler {
     let nextLink = null;
     let pageNum = 0;
 
-    const firstUrl = `/me/mailFolders/${resolvedFolderId}/messages?$top=${pageSize}&$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,hasAttachments,internetMessageHeaders`;
+    const firstUrl = `${this.me}/mailFolders/${resolvedFolderId}/messages?$top=${pageSize}&$select=id,subject,from,toRecipients,ccRecipients,bccRecipients,receivedDateTime,hasAttachments,internetMessageHeaders`;
 
     do {
       const listUrl = nextLink || firstUrl;
@@ -260,9 +266,9 @@ export class GraphHandler {
       for (const stub of msgStubs) {
         if (messages.length >= maxMessages) break;
 
-        this.log('C→S', `GET ${GRAPH_BASE}/me/messages/${stub.id}/$value`);
+        this.log('C→S', `GET ${this.base}/me/messages/${stub.id}/$value`);
 
-        const mimeRes = await fetch(`${GRAPH_BASE}/me/messages/${stub.id}/$value`, {
+        const mimeRes = await fetch(`${this.base}/me/messages/${stub.id}/$value`, {
           headers: { Authorization: `Bearer ${this.accessToken}` },
         });
 

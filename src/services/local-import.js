@@ -4,121 +4,114 @@ import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { simpleParser } from 'mailparser';
 import { HashManager } from './hash-manager.js';
+import { buildMessageRecord } from './collection-engine.js';
 import { PstReader } from './pst/pst-reader.js';
 import { buildMime } from './pst/pst-to-mime.js';
-import { hashFile } from './pst/pst-export.js';
+import { hashFile, readMbox, findSources } from './pst/pst-export.js';
+import { protectionFlags } from './crypto-service.js';
 
 const safeSegment = s => (s || '_').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/[. ]+$/, '_').slice(0, 80);
+const BATCH = 200;
+const csvCell = (v) => { const t = String(v ?? ''); return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+
+function sourceFiles(root) {
+  const files = [];
+  const walk = (p) => {
+    if (fs.statSync(p).isDirectory()) for (const name of fs.readdirSync(p)) walk(path.join(p, name));
+    else files.push(p);
+  };
+  walk(root);
+  return files;
+}
 
 export class LocalImportService {
 
-  static async importMbox(filePath, projectId, options = {}) {
-    const content = fs.readFileSync(filePath, 'utf8');
-    const messages = this._parseMbox(content);
-    const results = [];
+  // A folder of .eml files, or one .eml. Each message is copied byte for byte into the import folder and
+  // the copy is checked against the source, so the case keeps its evidence and the source is only read.
+  // mbox: each message of an .mbox is stored as its own EML, exactly as written apart from undoing the
+  // reversible mboxrd ">From " quoting. Both record a map from each EML back to where it came from.
+  static async importMail(sourcePath, projectId, options = {}) {
+    const { outputDir, acquisitionId, format } = options;
+    if (!outputDir) throw new Error('The import needs an output folder');
+    const save = options.save || (() => {});
+    const baseFolder = options.targetFolder || `Imported/${format === 'mbox' ? 'MBOX' : 'EML'}/${path.basename(sourcePath, path.extname(sourcePath))}`;
+    fs.mkdirSync(outputDir, { recursive: true });
 
-    for (let i = 0; i < messages.length; i++) {
-      try {
-        const parsed = await simpleParser(messages[i].raw);
-        const hashes = HashManager.computeAll(messages[i].raw);
-        results.push({
-          id: uuidv4(),
-          projectId,
-          folder: options.targetFolder || 'Imported/MBOX',
-          subject: parsed.subject || '(no subject)',
-          fromAddress: parsed.from?.text || '',
-          toAddresses: parsed.to?.value?.map(a => a.address) || [],
-          ccAddresses: parsed.cc?.value?.map(a => a.address) || [],
-          date: parsed.date?.toISOString() || null,
-          messageId: parsed.messageId || null,
-          inReplyTo: parsed.inReplyTo || null,
-          size: Buffer.byteLength(messages[i].raw),
-          hasAttachments: (parsed.attachments?.length || 0) > 0,
-          attachmentCount: parsed.attachments?.length || 0,
-          hashMd5: hashes.md5,
-          hashSha1: hashes.sha1,
-          hashSha256: hashes.sha256,
-          hashSha384: hashes.sha384,
-          hashSha512: hashes.sha512,
-          bodyText: parsed.text || '',
-          bodyHtml: parsed.html || '',
-          headers: parsed.headers ? Object.fromEntries(parsed.headers) : {},
-          isEncrypted: this._detectEncryption(parsed),
-          isSigned: this._detectSignature(parsed),
-          source: 'mbox_import',
-          sourceFile: path.basename(filePath),
-          attachments: (parsed.attachments || []).map(att => ({
-            id: uuidv4(),
-            filename: att.filename || 'unnamed',
-            contentType: att.contentType,
-            size: att.size,
-            hashSha256: crypto.createHash('sha256').update(att.content).digest('hex'),
-            hashMd5: crypto.createHash('md5').update(att.content).digest('hex'),
-            content: att.content,
-          })),
-        });
-      } catch (err) {
-        results.push({ error: err.message, index: i, source: 'mbox_import' });
+    const sources = format === 'mbox'
+      ? [{ type: 'mbox', path: sourcePath, folder: [] }]
+      : sourceFiles(sourcePath).filter(f => f.toLowerCase().endsWith('.eml')).map(f => ({ type: 'eml', path: f, folder: path.relative(fs.statSync(sourcePath).isDirectory() ? sourcePath : path.dirname(sourcePath), path.dirname(f)).split(path.sep).filter(Boolean) }));
+    if (!sources.length) throw new Error('No .eml files found there');
+
+    const sourceHashesBefore = new Map();
+    for (const s of sources) sourceHashesBefore.set(s.path, await hashFile(s.path));
+
+    const items = [];
+    const errors = [];
+    let batch = [];
+    let n = 0;
+    const flush = () => { if (batch.length) { save(batch); batch = []; } };
+    const add = async (raw, source, folderParts, ref) => {
+      const uid = ++n;
+      const folder = [baseFolder, ...folderParts].filter(Boolean).join('/');
+      const dir = path.join(outputDir, ...folderParts.map(safeSegment));
+      fs.mkdirSync(dir, { recursive: true });
+      const emlPath = path.join(dir, `${String(uid).padStart(6, '0')}.eml`);
+      const record = await buildMessageRecord(raw, { uid, serviceId: ref, folder, folderPaths: [folder] });
+      fs.writeFileSync(emlPath, raw, { flag: 'wx' });
+      if (crypto.createHash('sha256').update(fs.readFileSync(emlPath)).digest('hex') !== record.hashSha256) {
+        fs.unlinkSync(emlPath);
+        throw new Error('The stored copy does not match the source bytes');
       }
-    }
-
-    return {
-      source: filePath,
-      format: 'mbox',
-      totalParsed: messages.length,
-      successful: results.filter(r => !r.error).length,
-      failed: results.filter(r => r.error).length,
-      messages: results,
+      delete record.rawMime;
+      for (const att of record.attachments || []) delete att.content;
+      batch.push({ ...record, projectId, acquisitionId, emlPath, source: `${format}_import`, sourceFile: path.basename(source) });
+      if (batch.length >= BATCH) flush();
+      items.push({ emlPath: path.relative(outputDir, emlPath), source, ref, subject: record.subject, messageId: record.messageId || '', sha256: record.hashSha256, size: raw.length });
+      options.onProgress?.(items.length, errors.length);
     };
-  }
 
-  static async importEmlDirectory(dirPath, projectId, options = {}) {
-    const files = fs.readdirSync(dirPath).filter(f => f.toLowerCase().endsWith('.eml'));
-    const results = [];
-
-    for (const file of files) {
+    for (const s of sources) {
       try {
-        const filePath = path.join(dirPath, file);
-        const raw = fs.readFileSync(filePath);
-        const parsed = await simpleParser(raw);
-        const hashes = HashManager.computeAll(raw);
-
-        results.push({
-          id: uuidv4(),
-          projectId,
-          folder: options.targetFolder || 'Imported/EML',
-          subject: parsed.subject || '(no subject)',
-          fromAddress: parsed.from?.text || '',
-          toAddresses: parsed.to?.value?.map(a => a.address) || [],
-          ccAddresses: parsed.cc?.value?.map(a => a.address) || [],
-          date: parsed.date?.toISOString() || null,
-          messageId: parsed.messageId || null,
-          size: raw.length,
-          hasAttachments: (parsed.attachments?.length || 0) > 0,
-          attachmentCount: parsed.attachments?.length || 0,
-          hashMd5: hashes.md5,
-          hashSha1: hashes.sha1,
-          hashSha256: hashes.sha256,
-          hashSha384: hashes.sha384,
-          hashSha512: hashes.sha512,
-          bodyText: parsed.text || '',
-          bodyHtml: parsed.html || '',
-          emlPath: filePath,
-          source: 'eml_import',
-          sourceFile: file,
-        });
+        if (s.type === 'eml') {
+          await add(fs.readFileSync(s.path), s.path, s.folder, path.basename(s.path));
+        } else {
+          let index = 0;
+          for await (const raw of readMbox(s.path, { unquote: options.unquoteMbox !== false })) {
+            index++;
+            try {
+              await add(raw, s.path, s.folder, `message ${index}`);
+            } catch (err) {
+              errors.push({ source: s.path, item: `message ${index}`, error: err.message });
+            }
+          }
+        }
       } catch (err) {
-        results.push({ error: err.message, file, source: 'eml_import' });
+        errors.push({ source: s.path, item: path.basename(s.path), error: err.message });
       }
+    }
+    flush();
+
+    const changed = [];
+    for (const s of sources) if ((await hashFile(s.path)) !== sourceHashesBefore.get(s.path)) changed.push(s.path);
+
+    const map = [['EML File', 'Source', 'Position', 'Subject', 'Internet Message-ID', 'SHA-256', 'Size'].join(','),
+      ...items.map(i => [i.emlPath, i.source, i.ref, i.subject, i.messageId, i.sha256, i.size].map(csvCell).join(','))].join('\r\n') + '\r\n';
+    fs.writeFileSync(path.join(outputDir, 'import_map.csv'), map, 'utf8');
+    if (errors.length) {
+      fs.writeFileSync(path.join(outputDir, 'import_errors.txt'), errors.map(e => [e.source, e.item, e.error].join('\t')).join('\r\n') + '\r\n', 'utf8');
     }
 
     return {
-      source: dirPath,
-      format: 'eml',
-      totalFiles: files.length,
-      successful: results.filter(r => !r.error).length,
-      failed: results.filter(r => r.error).length,
-      messages: results,
+      source: sourcePath,
+      format,
+      sourceFiles: sources.length,
+      sourceSha256: format === 'mbox' ? sourceHashesBefore.get(sourcePath) : null,
+      sourceUnchanged: changed.length === 0,
+      outputDir,
+      totalParsed: items.length + errors.length,
+      successful: items.length,
+      failed: errors.length,
+      errors: errors.slice(0, 50),
     };
   }
 
@@ -184,6 +177,8 @@ export class LocalImportService {
             const record = {
               id: uuidv4(),
               projectId,
+              acquisitionId: options.acquisitionId,
+              uid: successful + 1,
               folder: dbFolder,
               subject: parsed.subject || '(no subject)',
               fromAddress: parsed.from?.text || '',
@@ -207,8 +202,7 @@ export class LocalImportService {
               bodyText: parsed.text || '',
               bodyHtml: parsed.html || '',
               headers: parsed.headers ? Object.fromEntries(parsed.headers) : {},
-              isEncrypted: this._detectEncryption(parsed),
-              isSigned: this._detectSignature(parsed),
+              ...protectionFlags(eml),
               source: 'pst_import',
               sourceFile: path.basename(filePath),
               attachments: (parsed.attachments || []).map(att => ({
@@ -224,7 +218,7 @@ export class LocalImportService {
               })),
             };
             batch.push(record);
-            if (batch.length >= 200) flush();
+            if (batch.length >= BATCH) flush();
             successful++;
             items.push({ emlPath: path.relative(outputDir, emlPath), pstFolder, nid: ref, subject: record.subject, messageId: record.messageId || '', sha256: hashes.sha256, originalSha256: originalShaTag ? (p.get(originalShaTag) || '') : '', notes: notes.join('; ') });
           } catch (err) {
@@ -239,9 +233,8 @@ export class LocalImportService {
     }
 
     const sourceUnchanged = (await hashFile(filePath)) === sourceSha256;
-    const csv = v => { const t = String(v ?? ''); return /[",\r\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
     const map = [['EML File', 'PST Folder', 'PST Item', 'Subject', 'Internet Message-ID', 'EML SHA-256', 'SHA-256 of original MIME (recorded in PST)', 'Not carried over'].join(','),
-      ...items.map(i => [i.emlPath, i.pstFolder, i.nid, i.subject, i.messageId, i.sha256, i.originalSha256, i.notes].map(csv).join(','))].join('\r\n') + '\r\n';
+      ...items.map(i => [i.emlPath, i.pstFolder, i.nid, i.subject, i.messageId, i.sha256, i.originalSha256, i.notes].map(csvCell).join(','))].join('\r\n') + '\r\n';
     fs.writeFileSync(path.join(outputDir, 'pst_import_map.csv'), map, 'utf8');
     if (errors.length) {
       fs.writeFileSync(path.join(outputDir, 'pst_import_errors.txt'), errors.map(e => [e.folder, e.item || '', e.error].join('\t')).join('\r\n') + '\r\n', 'utf8');
@@ -259,36 +252,16 @@ export class LocalImportService {
       failed: errors.filter(e => e.item).length,
       folderErrors: errors.filter(e => !e.item).length,
       errors: errors.slice(0, 50),
-      messages: [],
     };
-  }
-
-  static _parseMbox(content) {
-    const messages = [];
-    const parts = content.split(/^From /gm);
-    for (let i = 1; i < parts.length; i++) {
-      const firstNewline = parts[i].indexOf('\n');
-      const raw = parts[i].substring(firstNewline + 1).replace(/^>From /gm, 'From ');
-      if (raw.trim()) messages.push({ raw });
-    }
-    return messages;
-  }
-
-  static _detectEncryption(parsed) {
-    const ct = parsed.contentType?.value || '';
-    return ct.includes('pkcs7-mime') || ct.includes('x-pkcs7-mime') || ct.includes('encrypted');
-  }
-
-  static _detectSignature(parsed) {
-    const ct = parsed.contentType?.value || '';
-    return ct.includes('pkcs7-signature') || ct.includes('x-pkcs7-signature') || ct.includes('signed');
   }
 
   static getSupportedFormats() {
     return {
-      mbox: { extensions: ['.mbox', '.mbx'], description: 'Unix MBOX mailbox (Google Takeout, Thunderbird export)', method: 'importMbox' },
-      eml: { extensions: ['.eml'], description: 'RFC 5322 email messages (individual files or directory)', method: 'importEmlDirectory' },
-      pst: { extensions: ['.pst'], description: 'Outlook data files (Unicode and ANSI PST); items are rebuilt as EML and labelled as reconstructions', method: 'importPst' },
+      mbox: { extensions: ['.mbox', '.mbx'], description: 'Unix MBOX mailbox (Google Takeout, Thunderbird export). Each message is stored byte for byte as its own EML.' },
+      eml: { extensions: ['.eml'], description: 'RFC 5322 email messages: one file, or a folder searched recursively. Each file is copied byte for byte.' },
+      pst: { extensions: ['.pst', '.ost'], description: 'Outlook data files (Unicode and ANSI). A PST holds properties, not the original MIME, so items are rebuilt as EML and labelled as reconstructions.' },
     };
   }
 }
+
+export { findSources };

@@ -1,146 +1,10 @@
-import crypto from 'crypto';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import dns from 'dns';
 import net from 'net';
 import tls from 'tls';
 import os from 'os';
-import https from 'https';
-import http from 'http';
-
-export class RetryPolicy {
-  constructor(options = {}) {
-    this.maxRetries = options.maxRetries ?? 3;
-    this.baseDelayMs = options.baseDelayMs ?? 1000;
-    this.maxDelayMs = options.maxDelayMs ?? 30000;
-    this.backoffMultiplier = options.backoffMultiplier ?? 2;
-    this.jitterFactor = options.jitterFactor ?? 0.1;
-    this.retryableErrors = options.retryableErrors || ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'EAI_AGAIN'];
-    this.retryableStatusCodes = options.retryableStatusCodes || [408, 429, 500, 502, 503, 504];
-  }
-
-  async execute(fn) {
-    let lastError;
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
-      try {
-        return await fn(attempt);
-      } catch (err) {
-        lastError = err;
-        if (attempt === this.maxRetries) break;
-        if (!this._isRetryable(err)) break;
-        const delay = this._computeDelay(attempt);
-        await new Promise(r => setTimeout(r, delay));
-      }
-    }
-    throw lastError;
-  }
-
-  _isRetryable(err) {
-    if (this.retryableErrors.includes(err.code)) return true;
-    if (err.statusCode && this.retryableStatusCodes.includes(err.statusCode)) return true;
-    if (err.message?.includes('throttl') || err.message?.includes('rate limit')) return true;
-    return false;
-  }
-
-  _computeDelay(attempt) {
-    let delay = this.baseDelayMs * Math.pow(this.backoffMultiplier, attempt);
-    delay = Math.min(delay, this.maxDelayMs);
-    const jitter = delay * this.jitterFactor * (Math.random() * 2 - 1);
-    return Math.max(0, Math.round(delay + jitter));
-  }
-}
-
-export class CircuitBreaker {
-  constructor(options = {}) {
-    this.failureThreshold = options.failureThreshold ?? 5;
-    this.resetTimeoutMs = options.resetTimeoutMs ?? 60000;
-    this.halfOpenMax = options.halfOpenMax ?? 1;
-    this.state = 'closed';
-    this.failures = 0;
-    this.lastFailure = 0;
-    this.successes = 0;
-  }
-
-  async execute(fn) {
-    if (this.state === 'open') {
-      if (Date.now() - this.lastFailure >= this.resetTimeoutMs) {
-        this.state = 'half-open';
-        this.successes = 0;
-      } else {
-        throw new Error('Circuit breaker is OPEN — service unavailable');
-      }
-    }
-
-    try {
-      const result = await fn();
-      this._onSuccess();
-      return result;
-    } catch (err) {
-      this._onFailure();
-      throw err;
-    }
-  }
-
-  _onSuccess() {
-    if (this.state === 'half-open') {
-      this.successes++;
-      if (this.successes >= this.halfOpenMax) {
-        this.state = 'closed';
-        this.failures = 0;
-      }
-    } else {
-      this.failures = Math.max(0, this.failures - 1);
-    }
-  }
-
-  _onFailure() {
-    this.failures++;
-    this.lastFailure = Date.now();
-    if (this.failures >= this.failureThreshold) this.state = 'open';
-  }
-
-  getState() {
-    if (this.state === 'open' && Date.now() - this.lastFailure >= this.resetTimeoutMs) return 'half-open';
-    return this.state;
-  }
-}
-
-export class RateLimiter {
-  constructor(options = {}) {
-    this.maxRequests = options.maxRequests ?? 30;
-    this.windowMs = options.windowMs ?? 60000;
-    this.tokens = this.maxRequests;
-    this.lastRefill = Date.now();
-  }
-
-  async acquire() {
-    this._refill();
-    if (this.tokens <= 0) {
-      const waitMs = this.windowMs - (Date.now() - this.lastRefill);
-      await new Promise(r => setTimeout(r, Math.max(waitMs, 100)));
-      this._refill();
-    }
-    if (this.tokens <= 0) throw new Error('Rate limit exceeded');
-    this.tokens--;
-  }
-
-  _refill() {
-    const now = Date.now();
-    const elapsed = now - this.lastRefill;
-    if (elapsed >= this.windowMs) {
-      this.tokens = this.maxRequests;
-      this.lastRefill = now;
-    } else {
-      const refill = Math.floor((elapsed / this.windowMs) * this.maxRequests);
-      this.tokens = Math.min(this.maxRequests, this.tokens + refill);
-    }
-  }
-
-  getStatus() {
-    this._refill();
-    return { remainingTokens: this.tokens, maxRequests: this.maxRequests, windowMs: this.windowMs };
-  }
-}
+import nodemailer from 'nodemailer';
 
 export class EmailValidator {
   static EMAIL_REGEX = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
@@ -186,40 +50,34 @@ export class AutomationService {
   // ── SMTP Completion Notifications (Feature 24) ──
 
   static async sendNotification(smtpSettings, notification) {
-    const { host, port, secure, username, password, fromAddress, toAddresses } = smtpSettings;
+    const { host, port, secure, username, password, fromAddress, toAddresses, allowUnverifiedCertificate } = smtpSettings;
     const recipients = typeof toAddresses === 'string' ? JSON.parse(toAddresses) : toAddresses;
-
-    const boundary = `----=_Part_${uuidv4().substring(0, 8)}`;
+    if (!host) return { success: false, error: 'SMTP host is required' };
+    if (!recipients?.length) return { success: false, error: 'At least one recipient is required' };
     const subject = this._buildSubject(notification);
-    const bodyText = this._buildBodyText(notification);
-    const bodyHtml = this._buildBodyHtml(notification);
-
-    const message = [
-      `From: ${fromAddress}`,
-      `To: ${recipients.join(', ')}`,
-      `Subject: ${subject}`,
-      `Date: ${new Date().toUTCString()}`,
-      `Message-ID: <${uuidv4()}@sherlockmail.local>`,
-      `MIME-Version: 1.0`,
-      `Content-Type: multipart/alternative; boundary="${boundary}"`,
-      `X-Mailer: SherlockMail v0.9.0`,
-      '',
-      `--${boundary}`,
-      'Content-Type: text/plain; charset=utf-8',
-      '',
-      bodyText,
-      '',
-      `--${boundary}`,
-      'Content-Type: text/html; charset=utf-8',
-      '',
-      bodyHtml,
-      '',
-      `--${boundary}--`,
-    ].join('\r\n');
-
     try {
-      await this._sendSmtp(host, port || 587, secure, username, password, fromAddress, recipients, message);
-      return { success: true, recipients: recipients.length, subject };
+      const transport = nodemailer.createTransport({
+        host,
+        port: Number(port) || (secure ? 465 : 587),
+        secure: !!secure,
+        // Not implicit TLS: STARTTLS is used, and required unless the server is on this computer.
+        requireTLS: !secure && !/^(localhost|127\.\d+\.\d+\.\d+|::1)$/.test(host),
+        auth: username ? { user: username, pass: password } : undefined,
+        tls: { rejectUnauthorized: !allowUnverifiedCertificate },
+        connectionTimeout: 30000,
+        socketTimeout: 60000,
+      });
+      const info = await transport.sendMail({
+        from: fromAddress,
+        to: recipients,
+        subject,
+        text: this._buildBodyText(notification),
+        html: this._buildBodyHtml(notification),
+        headers: { 'X-Mailer': 'SherlockMail v0.9.0' },
+      });
+      transport.close();
+      if (info.rejected?.length) return { success: false, error: `Rejected: ${info.rejected.join(', ')}`, accepted: info.accepted };
+      return { success: true, recipients: info.accepted.length, subject, messageId: info.messageId };
     } catch (err) {
       return { success: false, error: err.message };
     }
@@ -245,70 +103,8 @@ export class AutomationService {
   }
 
   static _buildBodyHtml(n) {
-    return `<html><body style="font-family:Arial,sans-serif"><h2>SherlockMail Notification</h2><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><td><b>Type</b></td><td>${n.type}</td></tr><tr><td><b>Project</b></td><td>${n.projectName || 'N/A'}</td></tr><tr><td><b>Time</b></td><td>${new Date().toISOString()}</td></tr></table>${n.details ? `<pre>${JSON.stringify(n.details, null, 2)}</pre>` : ''}</body></html>`;
-  }
-
-  static async _sendSmtp(host, port, secure, username, password, from, to, message) {
-    return new Promise((resolve, reject) => {
-      const socket = secure ? tls.connect(port, host, { rejectUnauthorized: false }) : net.connect(port, host);
-      let response = '';
-      const commands = [];
-      let step = 0;
-
-      commands.push(`EHLO sherlockmail.local\r\n`);
-      if (!secure) commands.push(`STARTTLS\r\n`);
-      if (username) commands.push(`AUTH LOGIN\r\n`);
-      if (username) commands.push(Buffer.from(username).toString('base64') + '\r\n');
-      if (password) commands.push(Buffer.from(password).toString('base64') + '\r\n');
-      commands.push(`MAIL FROM:<${from}>\r\n`);
-      for (const r of to) commands.push(`RCPT TO:<${r}>\r\n`);
-      commands.push(`DATA\r\n`);
-      commands.push(message + '\r\n.\r\n');
-      commands.push(`QUIT\r\n`);
-
-      socket.on('data', (data) => {
-        response += data.toString();
-        if (response.includes('5') && response.charAt(0) === '5') {
-          socket.destroy(); reject(new Error(`SMTP error: ${response.trim()}`)); return;
-        }
-        if (step < commands.length) { socket.write(commands[step++]); }
-        else { socket.destroy(); resolve(); }
-      });
-      socket.on('error', reject);
-      socket.setTimeout(30000, () => { socket.destroy(); reject(new Error('SMTP timeout')); });
-    });
-  }
-
-  // ── CLI Automation (Feature 25) ──
-
-  static parseCliArgs(argv) {
-    const args = { command: null, options: {} };
-    let i = 2;
-    if (argv[i] && !argv[i].startsWith('--')) { args.command = argv[i]; i++; }
-
-    while (i < argv.length) {
-      const arg = argv[i];
-      if (arg.startsWith('--')) {
-        const key = arg.slice(2);
-        const next = argv[i + 1];
-        if (next && !next.startsWith('--')) { args.options[key] = next; i += 2; }
-        else { args.options[key] = true; i++; }
-      } else { i++; }
-    }
-    return args;
-  }
-
-  static getCliCommands() {
-    return {
-      collect: { description: 'Run email acquisition', options: ['--project <id>', '--email <address>', '--provider <type>', '--protocol <name>', '--output <dir>'] },
-      export: { description: 'Export collected messages', options: ['--project <id>', '--format <eml|msg|pst|mbox|pdf>', '--output <dir>'] },
-      search: { description: 'Search collected messages', options: ['--project <id>', '--query <text>', '--from <address>', '--since <date>'] },
-      qc: { description: 'Run quality control checks', options: ['--project <id>'] },
-      verify: { description: 'Verify evidence integrity', options: ['--project <id>'] },
-      status: { description: 'Show project status', options: ['--project <id>', '--all'] },
-      import: { description: 'Import local email files', options: ['--project <id>', '--path <file_or_dir>', '--format <mbox|eml|pst>'] },
-      timestamp: { description: 'Request RFC 3161 timestamp', options: ['--project <id>', '--tsa <url>'] },
-    };
+    const h = v => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<html><body style="font-family:Arial,sans-serif"><h2>SherlockMail Notification</h2><table border="1" cellpadding="6" style="border-collapse:collapse"><tr><td><b>Type</b></td><td>${h(n.type)}</td></tr><tr><td><b>Project</b></td><td>${h(n.projectName || 'N/A')}</td></tr><tr><td><b>Time</b></td><td>${new Date().toISOString()}</td></tr></table>${n.details ? `<pre>${h(JSON.stringify(n.details, null, 2))}</pre>` : ''}</body></html>`;
   }
 
   // ── Health Monitoring (Feature 26) ──
@@ -317,7 +113,8 @@ export class AutomationService {
     const freeMem = os.freemem();
     const totalMem = os.totalmem();
     const memUsagePercent = ((totalMem - freeMem) / totalMem * 100).toFixed(1);
-    const cpuLoad = os.loadavg();
+    // Windows has no load average; os.loadavg() reports 0 there, which would read as an idle machine.
+    const cpuLoad = process.platform === 'win32' ? null : os.loadavg()[0];
 
     const events = [];
 
@@ -335,7 +132,7 @@ export class AutomationService {
         hostname: os.hostname(),
         uptime: os.uptime(),
         cpuCores: os.cpus().length,
-        cpuLoad: cpuLoad[0],
+        cpuLoad,
         totalMemory: totalMem,
         freeMemory: freeMem,
         memoryUsagePercent: parseFloat(memUsagePercent),
@@ -456,87 +253,54 @@ export class AutomationService {
   // ── Connectivity Testing (Feature 29) ──
 
   static async testConnectivity(host, port, protocol, options = {}) {
-    const result = {
-      id: uuidv4(),
-      host, port, protocol,
-      status: 'testing',
-      tested_at: new Date().toISOString(),
-    };
-
+    const result = { id: uuidv4(), host, port, protocol, status: 'testing', tested_at: new Date().toISOString() };
+    const timeout = options.timeout || 10000;
+    let socket = null;
     try {
       const start = Date.now();
+      // The operating system's resolver, as a real connection would use: hosts files and IPv6 count.
+      const addresses = await dns.promises.lookup(host, { all: true });
+      result.dnsResolved = addresses.map(a => a.address).join(', ');
 
-      // DNS resolution
-      const addresses = await new Promise((resolve, reject) => {
-        dns.resolve4(host, (err, addrs) => err ? reject(err) : resolve(addrs));
-      });
-      result.dnsResolved = addresses.join(', ');
-
-      // TCP connection
-      const socket = await new Promise((resolve, reject) => {
+      socket = await new Promise((resolve, reject) => {
         const s = net.connect(port, host, () => resolve(s));
-        s.setTimeout(options.timeout || 10000);
-        s.on('timeout', () => { s.destroy(); reject(new Error('Connection timeout')); });
+        s.setTimeout(timeout);
+        s.on('timeout', () => { s.destroy(); reject(new Error('Connection timed out')); });
         s.on('error', reject);
       });
-
       result.latencyMs = Date.now() - start;
 
-      // TLS upgrade if applicable
-      if (protocol === 'imaps' || protocol === 'pop3s' || port === 993 || port === 995 || port === 465) {
-        const tlsSocket = await new Promise((resolve, reject) => {
-          const s = tls.connect({ socket, servername: host, rejectUnauthorized: false }, () => resolve(s));
-          s.on('error', reject);
+      const implicitTls = ['imaps', 'pop3s', 'smtps', 'https'].includes(protocol) || (!['imap', 'pop3', 'smtp'].includes(protocol) && [993, 995, 465, 443].includes(Number(port)));
+      if (implicitTls) {
+        const secure = await new Promise((resolve, reject) => {
+          const s = tls.connect({ socket, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: false }, () => resolve(s));
+          s.on('error', err => reject(err.code?.startsWith('ERR_SSL') ? new Error(`The server does not speak TLS on port ${port}`) : err));
+          s.setTimeout(timeout, () => { s.destroy(); reject(new Error('The TLS handshake timed out')); });
         });
-        result.tlsVersion = tlsSocket.getProtocol();
-        const cert = tlsSocket.getPeerCertificate();
-        result.certificateInfo = {
-          subject: cert.subject?.CN || null,
-          issuer: cert.issuer?.O || null,
-          validFrom: cert.valid_from,
-          validTo: cert.valid_to,
-          fingerprint: cert.fingerprint256,
-        };
-        tlsSocket.destroy();
-      } else {
-        // Read banner
-        const banner = await new Promise((resolve) => {
+        socket = secure;
+        result.tlsVersion = secure.getProtocol();
+        // Connecting does not depend on it, but a certificate that fails verification is a finding.
+        result.certificateValid = secure.authorized;
+        result.certificateError = secure.authorized ? null : String(secure.authorizationError || '');
+        const cert = secure.getPeerCertificate();
+        result.certificateInfo = { subject: cert.subject?.CN || null, issuer: cert.issuer?.O || cert.issuer?.CN || null, validFrom: cert.valid_from, validTo: cert.valid_to, fingerprint: cert.fingerprint256 };
+      }
+      // IMAP, POP3 and SMTP greet first; HTTPS does not.
+      if (![443, 80].includes(Number(port))) {
+        result.banner = await new Promise((resolve) => {
           let data = '';
-          socket.on('data', (chunk) => { data += chunk.toString(); if (data.includes('\r\n')) resolve(data.trim()); });
+          socket.on('data', (chunk) => { data += chunk.toString('latin1'); if (data.includes('\r\n')) resolve(data.trim()); });
           setTimeout(() => resolve(data.trim()), 3000);
         });
-        if (banner.includes('CAPABILITY')) result.imapCapabilities = banner;
-        socket.destroy();
       }
-
       result.status = 'success';
     } catch (err) {
       result.status = 'failed';
       result.error = err.message;
+    } finally {
+      socket?.destroy();
     }
-
     return result;
-  }
-
-  // ── Proxy Support (Feature 30) ──
-
-  static createProxyAgent(proxyConfig) {
-    const { proxyType, host, port, username, password } = proxyConfig;
-
-    if (proxyType === 'none' || !host) return null;
-
-    return {
-      type: proxyType,
-      host, port,
-      auth: username ? { username, password } : null,
-      getConnectionOptions(targetHost, targetPort) {
-        return {
-          proxy: { host, port, type: proxyType },
-          target: { host: targetHost, port: targetPort },
-          auth: username ? `${username}:${password}` : null,
-        };
-      },
-    };
   }
 
   // ── Server Profile Auto-Detection (Feature 31) ──
@@ -619,7 +383,7 @@ export class AutomationService {
         if (spf) profile.spfRecord = spf;
       } catch {}
 
-      // Autodiscover for Exchange
+      // The conventional address to try; whether it answers is what /exchange/autodiscover checks.
       profile.autodiscoverUrl = `https://autodiscover.${domain}/autodiscover/autodiscover.xml`;
 
     } catch (err) {
@@ -631,79 +395,51 @@ export class AutomationService {
 
   // ── Exchange AutoDiscover ──
 
-  static async exchangeAutoDiscover(email) {
+  // POX Autodiscover needs the mailbox's credentials on most servers; a 401 without them is reported as such.
+  static async exchangeAutoDiscover(email, password) {
     const domain = email.split('@')[1];
     if (!domain) throw new Error('Invalid email');
 
     const urls = [
       `https://${domain}/autodiscover/autodiscover.xml`,
       `https://autodiscover.${domain}/autodiscover/autodiscover.xml`,
-      `http://autodiscover.${domain}/autodiscover/autodiscover.xml`,
     ];
-
-    const autoDiscoverXml = `<?xml version="1.0" encoding="utf-8"?><Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006"><Request><EMailAddress>${email}</EMailAddress><AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema></Request></Autodiscover>`;
+    const xmlEscape = v => v.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const request = `<?xml version="1.0" encoding="utf-8"?><Autodiscover xmlns="http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006"><Request><EMailAddress>${xmlEscape(email)}</EMailAddress><AcceptableResponseSchema>http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a</AcceptableResponseSchema></Request></Autodiscover>`;
+    const headers = { 'Content-Type': 'text/xml' };
+    if (password) headers.Authorization = `Basic ${Buffer.from(`${email}:${password}`).toString('base64')}`;
+    const attempts = [];
 
     for (const url of urls) {
       try {
-        const body = await this._httpPost(url, autoDiscoverXml, { 'Content-Type': 'text/xml' }, 10000);
+        const res = await fetch(url, { method: 'POST', headers, body: request, signal: AbortSignal.timeout(10000) });
+        attempts.push({ url, status: res.status });
+        if (!res.ok) continue;
+        const body = await res.text();
         const ewsMatch = body.match(/<EwsUrl>(.*?)<\/EwsUrl>/);
-        const oabMatch = body.match(/<OABUrl>(.*?)<\/OABUrl>/);
-        const asMatch = body.match(/<ASUrl>(.*?)<\/ASUrl>/);
         const serverMatch = body.match(/<Server>(.*?)<\/Server>/);
-
         if (ewsMatch || serverMatch) {
           return {
-            email, domain,
-            discovered: true,
+            email, domain, discovered: true,
             ewsUrl: ewsMatch?.[1] || null,
-            oabUrl: oabMatch?.[1] || null,
-            activeSyncUrl: asMatch?.[1] || null,
+            oabUrl: body.match(/<OABUrl>(.*?)<\/OABUrl>/)?.[1] || null,
+            activeSyncUrl: body.match(/<ASUrl>(.*?)<\/ASUrl>/)?.[1] || null,
             server: serverMatch?.[1] || null,
             discoveredFrom: url,
+            attempts,
           };
         }
-      } catch {}
+      } catch (err) {
+        attempts.push({ url, error: err.message });
+      }
     }
 
-    // SRV record fallback
     try {
-      const srv = await new Promise((resolve, reject) => {
-        dns.resolveSrv(`_autodiscover._tcp.${domain}`, (err, records) => err ? reject(err) : resolve(records));
-      });
-      if (srv.length > 0) {
-        return {
-          email, domain, discovered: true,
-          server: srv[0].name,
-          port: srv[0].port,
-          discoveredFrom: 'SRV',
-        };
-      }
-    } catch {}
+      const srv = await dns.promises.resolveSrv(`_autodiscover._tcp.${domain}`);
+      if (srv.length > 0) return { email, domain, discovered: true, server: srv[0].name, port: srv[0].port, discoveredFrom: 'SRV', attempts };
+    } catch { /* no SRV record: not discovered */ }
 
-    return { email, domain, discovered: false };
-  }
-
-  static _httpPost(url, body, headers = {}, timeout = 10000) {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      const transport = parsed.protocol === 'https:' ? https : http;
-      const req = transport.request({
-        hostname: parsed.hostname, port: parsed.port, path: parsed.pathname,
-        method: 'POST', headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-        timeout, rejectUnauthorized: false,
-      }, (res) => {
-        const chunks = [];
-        res.on('data', c => chunks.push(c));
-        res.on('end', () => {
-          if (res.statusCode >= 200 && res.statusCode < 400) resolve(Buffer.concat(chunks).toString());
-          else reject(new Error(`HTTP ${res.statusCode}`));
-        });
-      });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-      req.write(body);
-      req.end();
-    });
+    return { email, domain, discovered: false, attempts, needsPassword: !password && attempts.some(a => a.status === 401) };
   }
 
   // ── Session/Output Naming ──

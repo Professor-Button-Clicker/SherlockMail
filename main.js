@@ -163,6 +163,21 @@ app.whenReady().then(async () => {
     process.env.SHERLOCKMAIL_DATA_DIR = join(app.getPath('userData'), 'data');
   }
   const port = await startServer();
+
+  // "SherlockMail.exe qc --project <id>" and the like: no window, JSON on stdout, the exit code says how it went.
+  const { CLI_COMMAND_NAMES, runCli } = await import('./src/cli.js');
+  const cliArgs = process.argv.slice(app.isPackaged ? 1 : 2);
+  if (CLI_COMMAND_NAMES.includes(cliArgs[0])) {
+    let code = 1;
+    try {
+      code = await runCli(`http://127.0.0.1:${port}`, cliArgs);
+    } catch (err) {
+      console.error(err.message);
+    }
+    app.exit(code);
+    return;
+  }
+
   await createWindow(port);
   watchCollections();
 });

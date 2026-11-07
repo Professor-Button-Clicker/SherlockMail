@@ -8,6 +8,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── CLI Argument Parsing ──
 const args = process.argv.slice(2);
+const { CLI_COMMAND_NAMES, runCli } = await import('./src/cli.js');
+const cliCommand = CLI_COMMAND_NAMES.includes(args[0]) ? args[0] : null;
+if (args[0] && !args[0].startsWith('-') && !cliCommand) {
+  console.error(`Unknown command: ${args[0]}. Commands: ${CLI_COMMAND_NAMES.join(', ')}. See --help.`);
+  process.exit(2);
+}
 
 function getArg(name, defaultValue) {
   const i = args.indexOf(`--${name}`);
@@ -15,10 +21,11 @@ function getArg(name, defaultValue) {
   return defaultValue;
 }
 
-const PORT = parseInt(getArg('port', process.env.PORT || '3000'), 10);
+// A command runs against its own server on a free port, on this computer only, and exits.
+const PORT = cliCommand ? 0 : parseInt(getArg('port', process.env.PORT || '3000'), 10);
 // Loopback only by default: the API has no authentication and exposes case data and stored credentials.
 const HOST = getArg('host', '127.0.0.1');
-const NO_BROWSER = args.includes('--no-browser');
+const NO_BROWSER = args.includes('--no-browser') || !!cliCommand;
 const DATA_DIR = getArg('data-dir', null);
 
 if (args.includes('--help') || args.includes('-h')) {
@@ -27,6 +34,17 @@ SherlockMail v0.9.0 — Forensic Email Collection Tool
 
 Usage: SherlockMail [options]
        node server.js [options]
+       node server.js <command> [--data-dir <path>] [command options]
+
+Commands (JSON on stdout; exit code 1 if the evidence or the operation has a problem):
+  status      [--project <id>]
+  collect     --project <id> --connection <file.json> [--folders "INBOX,Sent"] [--output <dir>]
+  import      --project <id> --path <file or folder>
+  search      --project <id> --query <text>
+  qc          --project <id>
+  verify      --project <id>
+  export      --project <id> --format <eml|msg|pst|mbox|mime|pdf|concordance|xml> [--output <dir>]
+  timestamp   --project <id> [--type collection|export] [--tsa <url>]
 
 Options:
   --port <number>      HTTP port (default: 3000)
@@ -114,7 +132,16 @@ app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'public', 'index.html'));
 });
 
-const server = app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, async () => {
+  if (cliCommand) {
+    let code = 1;
+    try {
+      code = await runCli(`http://127.0.0.1:${server.address().port}`, args);
+    } catch (err) {
+      console.error(err.message);
+    }
+    process.exit(code);
+  }
   const url = `http://${HOST === '0.0.0.0' || HOST === '::' ? 'localhost' : HOST}:${PORT}`;
   console.log('');
   console.log('  SherlockMail v0.9.0 — Forensic Email Collection');

@@ -9,16 +9,16 @@ import { fileURLToPath } from 'url';
 const execFileAsync = promisify(execFile);
 import {
   createProject, getProjects, getProjectsSummary, getProject, deleteProject, updateProjectStatus, updateProject,
-  saveFolders, getFolders, createAcquisition, saveMessage, saveMessagesBatch, getMessages, getMessageCount,
+  saveFolders, replaceFolders, getFolderSummary, getFolders, createAcquisition, saveMessage, saveMessagesBatch, getMessages, getMessageCount,
   saveSearchQuery, getSearchQueries, saveExportRecord, getExportRecords, updateExportRecord,
   getAuditLog, getFullAuditLog, getStats, addAuditEntry,
   getMessage, getAllProjectMessages, getProjectMessageKeys, updateAcquisition, getAcquisitions,
   saveAttachment, getAttachments, getProjectAttachments,
   saveDriveLink, getDriveLinks, setAttachmentLocalPath,
-  saveTimestampRecord, getTimestampRecords,
+  getTimestampRecords,
   saveInlineSearch, getInlineSearches,
   saveQcResult, getQcResults,
-  getDifferentialIds, saveDifferentialId, recoverInterruptedCollections, verifyAuditLogChain,
+  recoverInterruptedCollections, verifyAuditLogChain,
 } from '../db/database.js';
 import { ImapHandler } from '../protocols/imap-handler.js';
 import { Pop3Handler } from '../protocols/pop3-handler.js';
@@ -33,14 +33,14 @@ import { InlineSearchEngine } from '../services/inline-search.js';
 import { QualityControlService } from '../services/quality-control.js';
 import { CloudAttachmentService } from '../services/cloud-attachment-service.js';
 import { TimestampService } from '../services/timestamp-service.js';
-import { runCollection, supportsEngine, enumerateFolders } from '../services/collection-engine.js';
+import { runCollection, supportsEngine, enumerateFolders, COLLECTION_PROFILES } from '../services/collection-engine.js';
 import { normalizeQuery, planQuery, describeQuery, describeKeys, matchesLocally } from '../services/collection-query.js';
 import { driveAvailability, driveProviderFor, collectDrive, estimateDrive, writeDriveManifest, safeSegment } from '../services/drive-collector.js';
 import { collectLinkedFiles, writeLinkedFilesManifest, LINKED_FOLDER_NAME } from '../services/linked-files.js';
 import { simpleParser } from 'mailparser';
 import {
   getAuthStatus, getAuthUrl, saveCredentials, loadCredentials,
-  startCallbackServer, waitForAuth, stopCallbackServer, revokeTokens,
+  startCallbackServer, waitForAuth, stopCallbackServer, revokeTokens, getGoogleAccessToken,
 } from '../services/google-oauth.js';
 import {
   getAuthStatus as msGetAuthStatus, getAuthUrl as msGetAuthUrl,
@@ -66,21 +66,22 @@ import {
   getAuthStatus as yahooGetAuthStatus, getAuthUrl as yahooGetAuthUrl,
   saveCredentials as yahooSaveCredentials,
   startCallbackServer as yahooStartCallbackServer, waitForAuth as yahooWaitForAuth,
-  stopCallbackServer as yahooStopCallbackServer, revokeTokens as yahooRevokeTokens,
+  stopCallbackServer as yahooStopCallbackServer, revokeTokens as yahooRevokeTokens, getAccessToken as yahooGetAccessToken,
 } from '../services/yahoo-oauth.js';
 import { EnterpriseAuthService } from '../services/enterprise-auth.js';
 import { ExchangeAdvancedService } from '../services/exchange-advanced.js';
 import { LocalImportService } from '../services/local-import.js';
 import { CloudCollectionService } from '../services/cloud-collection.js';
-import { CloudDownloadPipeline } from '../services/cloud-download-pipeline.js';
 import { ContainerService } from '../services/container-service.js';
 import { ReportService } from '../services/report-service.js';
-import { AdvancedSearchService } from '../services/advanced-search.js';
+import { computeDifferentialPlan } from '../services/advanced-search.js';
 import { AutomationService } from '../services/automation-service.js';
 import { CryptoService } from '../services/crypto-service.js';
 import { FileTypeDetector } from '../services/file-detection.js';
 import { MetadataExportService } from '../services/metadata-export.js';
-import { RetryPolicy, CircuitBreaker, RateLimiter, EmailValidator } from '../services/automation-service.js';
+import { EmailValidator } from '../services/automation-service.js';
+import { encryptSecret, decryptSecret } from '../util/local-secret.js';
+import { applyProxy, describeProxy } from '../util/proxy.js';
 import {
   saveRfc3161Timestamp, getRfc3161Timestamps,
   saveFolderSnapshot, getFolderSnapshots,
@@ -89,7 +90,7 @@ import {
   saveContact, getContacts,
   saveCloudDownload, getCloudDownloads, updateCloudDownload,
   savePreAcquisitionSearch, getPreAcquisitionSearches,
-  indexMessage, searchIndex,
+  indexMessage, searchIndex, clearSearchIndex,
   saveSmtpSettings, getSmtpSettings,
   saveHealthEvent, getHealthEvents,
   saveAcquisitionTarget, getAcquisitionTargets, updateAcquisitionTarget,
@@ -98,6 +99,7 @@ import {
   saveServerProfile, getServerProfile, getAllServerProfiles,
   saveCertificate, getCertificates,
   saveCredential, getCredentials, getCredential, deleteCredential,
+  deleteSmtpSettings,
   saveCustomImapProfile, getCustomImapProfiles, getCustomImapProfile, deleteCustomImapProfile,
 } from '../db/database.js';
 
@@ -105,6 +107,29 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
 
 const router = Router();
+
+export const CLI_COMMANDS = {
+  status: { description: 'List projects, or show one', options: ['[--project <id>]'] },
+  collect: { description: 'Run a collection. Connection details come from a JSON file so no password is on the command line', options: ['--project <id>', '--connection <file.json>', '[--folders "INBOX,Sent"]', '[--output <dir>]'] },
+  import: { description: 'Import an EML folder or file, an MBOX or a PST', options: ['--project <id>', '--path <file or folder>'] },
+  search: { description: 'Search collected messages (same syntax as the app)', options: ['--project <id>', '--query <text>'] },
+  qc: { description: 'Run quality control; exit code 1 if any check fails', options: ['--project <id>'] },
+  verify: { description: 'Re-hash all evidence; exit code 1 if anything changed', options: ['--project <id>'] },
+  export: { description: 'Export collected messages', options: ['--project <id>', '--format <eml|msg|pst|mbox|mime|pdf|concordance|xml>', '[--output <dir>]'] },
+  timestamp: { description: 'Request a trusted RFC 3161 timestamp', options: ['--project <id>', '[--type collection|export]', '[--tsa <url>]'] },
+};
+
+const LOW_FREE_BYTES = 1024 * 1024 * 1024;
+const CRITICAL_FREE_BYTES = 200 * 1024 * 1024;
+const DISK_WATCH_MS = Number(process.env.SHERLOCKMAIL_DISK_WATCH_MS) || 30000;
+
+// The saved default proxy applies from the moment the app starts.
+try {
+  const saved = getDefaultProxy();
+  if (saved) applyProxy({ proxyType: saved.proxy_type, host: saved.host, port: saved.port, username: saved.username, password: decryptSecret(saved.password_encrypted) });
+} catch (err) {
+  console.error('Could not apply the saved proxy settings:', err.message);
+}
 
 try {
   const recovered = recoverInterruptedCollections();
@@ -551,7 +576,7 @@ router.post('/oauth/google/credentials', (req, res) => {
 router.get('/oauth/google/authorize', async (req, res) => {
   try {
     await startCallbackServer();
-    const url = getAuthUrl();
+    const url = getAuthUrl(String(req.query.features || '').split(',').filter(Boolean));
     if (!url) return res.status(400).json({ error: 'OAuth credentials not configured. Upload client_secret JSON first.' });
     res.json({ url });
   } catch (err) {
@@ -592,7 +617,7 @@ router.post('/oauth/microsoft/credentials', (req, res) => {
 router.get('/oauth/microsoft/authorize', async (req, res) => {
   try {
     await msStartCallbackServer();
-    const url = msGetAuthUrl();
+    const url = msGetAuthUrl(String(req.query.features || '').split(',').filter(Boolean));
     if (!url) return res.status(400).json({ error: 'Microsoft credentials not configured. Enter Client ID and Secret first.' });
     res.json({ url });
   } catch (err) {
@@ -853,77 +878,20 @@ router.post('/connect/test', async (req, res) => {
   const { protocol, config } = req.body;
 
   try {
-    let handler;
-    let result;
-
-    switch (protocol) {
-      case 'imap':
-        handler = new ImapHandler(config);
-        result = await handler.connect();
-        const folders = await handler.listFolders();
-        await handler.disconnect();
-        res.json({ ...result, folders, protocolLog: handler.getProtocolLog() });
-        return;
-
-      case 'pop3':
-        handler = new Pop3Handler(config);
-        result = await handler.connect();
-        const msgList = await handler.listMessages();
-        await handler.disconnect();
-        res.json({ ...result, messages: msgList, protocolLog: handler.getProtocolLog() });
-        return;
-
-      case 'ews': {
-        const ewsConfig = { ...config };
-        if (!ewsConfig.password && msGetAuthStatus().authorized) {
-          ewsConfig.authType = 'oauth2';
-          ewsConfig.accessToken = await msGetAccessToken();
-        }
-        handler = new EwsHandler(ewsConfig);
-        result = await handler.connect();
-        const ewsFolders = await handler.listFolders();
-        await handler.disconnect();
-        res.json({ ...result, folders: ewsFolders, protocolLog: handler.getProtocolLog() });
-        return;
-      }
-
-      case 'graph':
-        handler = new GraphHandler(config);
-        result = await handler.connect();
-        const graphFolders = await handler.listFolders();
-        await handler.disconnect();
-        res.json({ ...result, folders: graphFolders, protocolLog: handler.getProtocolLog() });
-        return;
-
-      case 'gmail_api':
-        handler = new GmailHandler(config);
-        result = await handler.connect();
-        const gmailFolders = await handler.listLabels();
-        await handler.disconnect();
-        res.json({ ...result, folders: gmailFolders, protocolLog: handler.getProtocolLog() });
-        return;
-
-      case 'zoho_api':
-        handler = new ZohoHandler(config);
-        result = await handler.connect();
-        const zohoFolders = await handler.listFolders();
-        await handler.disconnect();
-        res.json({ ...result, folders: zohoFolders, protocolLog: handler.getProtocolLog() });
-        return;
-
-      case 'jmap':
-        handler = new JmapHandler(config);
-        result = await handler.connect();
-        const jmapFolders = await handler.listFolders();
-        await handler.disconnect();
-        res.json({ ...result, folders: jmapFolders, protocolLog: handler.getProtocolLog() });
-        return;
-
-      default:
-        res.status(400).json({ error: `Unknown protocol: ${protocol}` });
+    const handler = await createHandler(protocol, config);
+    const result = await handler.connect();
+    if (protocol === 'pop3') {
+      const msgList = await handler.listMessages();
+      await handler.disconnect();
+      res.json({ ...result, messages: msgList, protocolLog: handler.getProtocolLog() });
+      return;
     }
+    const folders = await listHandlerFolders(handler);
+    await handler.disconnect();
+    res.json({ ...result, folders, protocolLog: handler.getProtocolLog() });
   } catch (err) {
-    let errorMsg = err.message;
+    let errorMsg = err.message || `The server refused the connection${err.status ? ` (HTTP ${err.status})` : ''}`;
+    if (/^Unsupported protocol/.test(errorMsg)) return res.status(400).json({ error: errorMsg, protocolLog: [] });
     const host = (config?.host || '').toLowerCase();
     if (/auth|login|credential|command/i.test(errorMsg) && /aol|yahoo/.test(host)) {
       errorMsg += '. AOL/Yahoo requires an app-specific password — generate one in your account security settings and select "App-Specific Password" as auth method.';
@@ -934,7 +902,7 @@ router.post('/connect/test', async (req, res) => {
 
 // ── Folders ──
 router.get('/projects/:id/folders', (req, res) => {
-  res.json(getFolders(req.params.id));
+  res.json(getFolderSummary(req.params.id));
 });
 
 router.post('/projects/:id/folders', (req, res) => {
@@ -1164,31 +1132,64 @@ function createCollectionSink({
   return { add, flush };
 }
 
-async function createEngineHandler(protocol, config, project) {
+// One way to build a handler, whichever protocol and sign-in is used: a saved OAuth sign-in, a password,
+// an app-only or imported Microsoft token, or Yahoo XOAUTH2 over IMAP.
+async function createHandler(protocol, rawConfig, project) {
+  const config = rawConfig ? { ...rawConfig } : {};
+  config.email = config.email || project?.target_email;
   switch (protocol) {
     case 'imap':
-      if (!config?.host) throw new Error('IMAP host is required');
+      if (!config.host) throw new Error('IMAP host is required');
+      if (config.authMethod === 'yahoo_oauth') {
+        config.accessToken = await yahooGetAccessToken();
+        config.username = config.username || yahooGetAuthStatus().email || config.email;
+      }
       return new ImapHandler(config);
     case 'pop3':
-      if (!config?.host) throw new Error('POP3 host is required');
+      if (!config.host) throw new Error('POP3 host is required');
       return new Pop3Handler(config);
     case 'ews': {
-      const ewsConfig = { ...(config || {}) };
-      ewsConfig.email = ewsConfig.email || project.target_email;
-      if (!ewsConfig.password && msGetAuthStatus().authorized) {
-        ewsConfig.authType = 'oauth2';
-        ewsConfig.tokenProvider = msGetAccessToken;
-        ewsConfig.accessToken = await msGetAccessToken();
+      const session = config.enterpriseSessionId ? EnterpriseAuthService.getSession(config.enterpriseSessionId) : null;
+      if (session) {
+        const resource = session.ewsEndpoint;
+        config.authType = 'oauth2';
+        config.ewsUrl = config.ewsUrl || `${resource}/EWS/Exchange.asmx`;
+        config.tokenProvider = () => session.tokenFor(resource);
+        config.accessToken = await session.tokenFor(resource);
+        // An app-only token reaches a mailbox only by impersonating it.
+        if (session.authMethod !== 'imported') config.impersonate = config.targetUser || config.email;
+      } else if (!config.password && msGetAuthStatus().authorized) {
+        config.authType = 'oauth2';
+        config.tokenProvider = msGetAccessToken;
+        config.accessToken = await msGetAccessToken();
       }
-      return new EwsHandler(ewsConfig);
+      return new EwsHandler(config);
     }
-    case 'graph':
-      return new GraphHandler(config || { email: project.target_email, authType: 'delegated' });
+    case 'graph': {
+      const session = config.enterpriseSessionId ? EnterpriseAuthService.getSession(config.enterpriseSessionId) : null;
+      if (session) {
+        config.tokenProvider = () => session.tokenFor(session.graphEndpoint);
+        config.graphBase = session.graphBase;
+        if (session.authMethod !== 'imported') config.targetUser = config.targetUser || config.email;
+      }
+      return new GraphHandler({ authType: 'delegated', ...config });
+    }
     case 'gmail_api':
-      return new GmailHandler(config || { email: project.target_email, authType: 'oauth2' });
+      return new GmailHandler({ authType: 'oauth2', ...config });
+    case 'zoho_api':
+      return new ZohoHandler(config);
+    case 'jmap':
+      return new JmapHandler(config);
     default:
       throw new Error(`Unsupported protocol: ${protocol}`);
   }
+}
+
+// Gmail lists labels, POP3 has a single unnamed mailbox.
+async function listHandlerFolders(handler) {
+  if (handler.listFolders) return handler.listFolders();
+  if (handler.listLabels) return handler.listLabels();
+  return null;
 }
 
 const COLLECTION_SCOPES = new Set(['email', 'drive', 'both']);
@@ -1221,27 +1222,33 @@ function validateCollectTarget({ scope, protocol, wantsEmail, wantsDrive }) {
 router.post('/projects/:id/collect', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
+  const started = await startCollection(project, req.body || {});
+  res.status(started.status).json(started.body);
+});
+
+async function startCollection(project, body) {
+  const refuse = (status, payload) => ({ status, body: payload });
   if (activeCollections.has(project.id)) {
-    return res.status(409).json({ error: 'A collection is already running for this project. Wait for it to finish or stop it first.', active: true });
+    return refuse(409, { error: 'A collection is already running for this project. Wait for it to finish or stop it first.', active: true });
   }
 
   let request;
   try {
-    request = parseCollectRequest(project, req.body || {});
+    request = parseCollectRequest(project, body);
   } catch (err) {
-    return res.status(400).json({ error: `Query: ${err.message}` });
+    return refuse(400, { error: `Query: ${err.message}` });
   }
   const { scope, protocol, destinationDir, query, queryPlan } = request;
   const invalid = validateCollectTarget(request);
-  if (invalid) return res.status(400).json({ error: invalid });
+  if (invalid) return refuse(400, { error: invalid });
 
   // A missing drive root (e.g. an unplugged evidence drive) makes a recursive mkdirSync hang on Windows.
   if (destinationDir && !fs.existsSync(path.parse(path.resolve(destinationDir)).root)) {
-    return res.status(400).json({ error: `Destination drive for ${destinationDir} is not available. Connect the drive or choose another destination.` });
+    return refuse(400, { error: `Destination drive for ${destinationDir} is not available. Connect the drive or choose another destination.` });
   }
   const diskCheck = await checkDiskSpace(destinationDir || DATA_DIR);
   if (!diskCheck.ok) {
-    return res.status(507).json({
+    return refuse(507, {
       error: `Insufficient disk space on ${diskCheck.drive}: ${Math.round(diskCheck.freeBytes / 1024 / 1024)} MB free, need at least ${Math.round(diskCheck.minFreeBytes / 1024 / 1024)} MB`,
       freeBytes: diskCheck.freeBytes,
     });
@@ -1250,19 +1257,19 @@ router.post('/projects/:id/collect', async (req, res) => {
   // Restarting into a location that already holds this project's collection is a differential
   // acquisition: only new items are collected, into their own "Differential Acquisition" folder.
   const rerun = priorCollectionAt(project.id, destinationDir);
-  const differential = rerun || req.body.differential === true;
+  const differential = rerun || body.differential === true;
   const sessionName = `${(project.name || project.id).replace(/[<>:"/\\|?*]/g, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
   let dirs;
   try {
     dirs = createSessionOutputDir(project.id, sessionName, destinationDir, { rerun });
   } catch (err) {
-    return res.status(400).json({ error: `Cannot create the output folders in ${destinationDir || 'the SherlockMail data folder'}: ${err.message}` });
+    return refuse(400, { error: `Cannot create the output folders in ${destinationDir || 'the SherlockMail data folder'}: ${err.message}` });
   }
 
-  const selectedFolders = Array.isArray(req.body.folders) && req.body.folders.length ? req.body.folders : null;
+  const selectedFolders = Array.isArray(body.folders) && body.folders.length ? body.folders : null;
   const queryDescription = describeQuery(query);
-  const attachmentFiles = req.body.collectAttachmentFiles === true;
-  const linkedFiles = req.body.collectLinkedFiles === true;
+  const attachmentFiles = body.collectAttachmentFiles === true;
+  const linkedFiles = body.collectLinkedFiles === true;
   const acquisitionId = createAcquisition(project.id, selectedFolders, {
     query, queryDescription, scope, outputDir: destinationDir, protocol, differential, examiner: project.examiner_name, attachmentFiles, linkedFiles,
   });
@@ -1280,10 +1287,10 @@ router.post('/projects/:id/collect', async (req, res) => {
   activeCollections.set(project.id, job);
   job.done = runCollectionJob({
     ...request, project, job, dirs, sessionName, differential, selectedFolders, attachmentFiles, linkedFiles,
-    limit: Math.max(0, parseInt(req.body.limit, 10) || 0),
-    exportFormats: Array.isArray(req.body.exportFormats) ? [...new Set(req.body.exportFormats.filter(f => typeof f === 'string'))] : [],
-    pdfSplitMode: typeof req.body.pdfSplitMode === 'string' ? req.body.pdfSplitMode : undefined,
-    pstMaxGb: pstSizeGb(req.body.pstMaxGb),
+    limit: Math.max(0, parseInt(body.limit, 10) || 0),
+    exportFormats: Array.isArray(body.exportFormats) ? [...new Set(body.exportFormats.filter(f => typeof f === 'string'))] : [],
+    pdfSplitMode: typeof body.pdfSplitMode === 'string' ? body.pdfSplitMode : undefined,
+    pstMaxGb: pstSizeGb(body.pstMaxGb),
   }).catch(err => {
     // Finalizing itself failed (e.g. the database became unavailable): still release the UI and record it.
     console.error(`Collection job for ${project.id} could not be finalized:`, err);
@@ -1296,12 +1303,16 @@ router.post('/projects/:id/collect', async (req, res) => {
     publishCollectEvent(project.id, { type: 'failed', result: progress.result });
   }).finally(() => activeCollections.delete(project.id));
 
-  res.status(202).json({
-    started: true, acquisitionId, scope, differential, rerun,
-    sessionDir: dirs.sessionDir, differentialFolder: dirs.differentialFolder,
-    query: { description: queryDescription, notes: queryPlan.notes, unsupported: queryPlan.unsupported.map(k => describeKeys([k])) },
-  });
-});
+  return {
+    status: 202,
+    job,
+    body: {
+      started: true, acquisitionId, scope, differential, rerun,
+      sessionDir: dirs.sessionDir, differentialFolder: dirs.differentialFolder,
+      query: { description: queryDescription, notes: queryPlan.notes, unsupported: queryPlan.unsupported.map(k => describeKeys([k])) },
+    },
+  };
+}
 
 async function runCollectionJob(ctx) {
   const { project, job, config, protocol, queryPlan, query, differential, limit, sessionName, destinationDir, scope, wantsEmail, wantsDrive } = ctx;
@@ -1330,6 +1341,54 @@ async function runCollectionJob(ctx) {
     if (progress.errors.length > 100) progress.errors.shift();
   };
   const unsupportedLabels = queryPlan.unsupported.map(k => describeKeys([k]));
+  let preSnapshot = null;
+  let snapshotComparison = null;
+
+  // The server's own folder list and counts, read live. Taken before the first message and after the last,
+  // so anything that changed in the mailbox during the collection is on record.
+  const takeSnapshot = async (activeHandler, type) => {
+    try {
+      const folders = await listHandlerFolders(activeHandler);
+      if (!folders) return null;
+      const snapshot = FolderSnapshotService.captureSnapshot(project.id, folders, acquisitionId, type);
+      saveFolderSnapshot(snapshot);
+      if (type === 'pre_acquisition') replaceFolders(project.id, folders);
+      live.write(`Folder snapshot (${type}): ${snapshot.totalFolders} folders, ${snapshot.totalMessages} messages, SHA-256 ${snapshot.hashSha256}`);
+      return snapshot;
+    } catch (err) {
+      live.write(`Folder snapshot (${type}) could not be taken: ${err.message}`);
+      return null;
+    }
+  };
+  const compareWithPreSnapshot = async (activeHandler) => {
+    if (!preSnapshot) return;
+    const post = await takeSnapshot(activeHandler, 'post_acquisition');
+    if (!post) return;
+    snapshotComparison = FolderSnapshotService.compareSnapshots(preSnapshot, post);
+    snapshotComparison.changed = !!(snapshotComparison.foldersAdded.length || snapshotComparison.foldersRemoved.length || snapshotComparison.foldersChanged.length);
+    if (snapshotComparison.changed) {
+      live.write(`The mailbox changed during the collection: ${snapshotComparison.foldersChanged.map(f => `${f.path} ${f.delta > 0 ? '+' : ''}${f.delta}`).join(', ') || 'folders added or removed'}`);
+    }
+  };
+
+  // Evidence must not be cut short by a full disk without the examiner being told why.
+  let lowDiskWarned = false;
+  const diskWatch = setInterval(async () => {
+    const disk = await checkDiskSpace(sessionDir, CRITICAL_FREE_BYTES);
+    if (disk.freeBytes < 0) return;
+    if (!disk.ok) {
+      saveHealthEvent({ projectId: project.id, acquisitionId, eventType: 'disk_space', severity: 'critical', message: `Stopped: only ${formatBytesServer(disk.freeBytes)} free on ${disk.drive}`, details: disk });
+      live.write(`Stopping: only ${formatBytesServer(disk.freeBytes)} free on ${disk.drive}`);
+      job.cancelReason = job.cancelReason || `Stopped because ${disk.drive} is nearly full (${formatBytesServer(disk.freeBytes)} free)`;
+      job.controller.abort();
+      clearInterval(diskWatch);
+    } else if (disk.freeBytes < LOW_FREE_BYTES && !lowDiskWarned) {
+      lowDiskWarned = true;
+      saveHealthEvent({ projectId: project.id, acquisitionId, eventType: 'disk_space', severity: 'warning', message: `Low disk space: ${formatBytesServer(disk.freeBytes)} free on ${disk.drive}`, details: disk });
+      live.write(`Low disk space: ${formatBytesServer(disk.freeBytes)} free on ${disk.drive}`);
+    }
+  }, DISK_WATCH_MS);
+  diskWatch.unref?.();
 
   const baseLog = () => ({
     ts, acquisitionId, startedAt, protocol, targetEmail: project.target_email, scope, differential,
@@ -1359,9 +1418,10 @@ async function runCollectionJob(ctx) {
     if (wantsEmail && supportsEngine(protocol)) {
       const target = describeTarget(protocol, config);
       live.write(`Email: ${targetFolders.length} folder(s) from ${target}: ${targetFolders.join(', ')}`);
-      handler = await createEngineHandler(protocol, config, project);
+      handler = await createHandler(protocol, config, project);
       progress.phase = 'connecting';
       await connectWithStatus(handler, progress, target, live, signal);
+      preSnapshot = await takeSnapshot(handler, 'pre_acquisition');
 
       let lastLogged = '';
       let lastHeartbeat = 0;
@@ -1437,15 +1497,13 @@ async function runCollectionJob(ctx) {
         sink.flush();
       }
       live.write(`Email download finished: ${progress.acquired} acquired, ${progress.failed} failed, ${progress.skipped} skipped (${progress.excluded} excluded by query), ${progress.duplicatesMerged || 0} label copies merged`);
+      if (!signal.aborted) await compareWithPreSnapshot(handler);
       await handler.disconnect().catch(() => {});
     } else if (wantsEmail) {
-      const factories = {
-        zoho_api: () => new ZohoHandler(config || { email: project.target_email }),
-        jmap: () => new JmapHandler(config || { email: project.target_email }),
-      };
-      handler = factories[protocol]();
+      handler = await createHandler(protocol, config, project);
       progress.phase = 'connecting';
       await retryWithBackoff(() => handler.connect());
+      preSnapshot = await takeSnapshot(handler, 'pre_acquisition');
       progress.phase = 'collecting';
       const folderMsgCounters = {};
       for (const folder of targetFolders) {
@@ -1503,6 +1561,7 @@ async function runCollectionJob(ctx) {
         }
         publish();
       }
+      if (!signal.aborted) await compareWithPreSnapshot(handler);
       await handler.disconnect().catch(() => {});
     }
 
@@ -1571,8 +1630,13 @@ async function runCollectionJob(ctx) {
     fatalError = err;
     await handler?.disconnect().catch(() => {});
   }
+  clearInterval(diskWatch);
   try {
-    return await finalizeCollection({ canceled: signal.aborted, fatal: fatalError });
+    const result = await finalizeCollection({ canceled: signal.aborted, fatal: fatalError });
+    await notifyByEmail(project, result.status === 'completed' ? 'acquisition_complete' : 'acquisition_error', {
+      status: result.status, completionType: result.completionType, messages: result.messageCount, failed: result.failedCount, error: result.error,
+    }, line => live.write(line));
+    return result;
   } finally {
     live.close();
   }
@@ -1602,9 +1666,12 @@ async function runCollectionJob(ctx) {
     // expected checksum is a verification warning on the whole collection.
     const verificationWarnings = (drive?.mismatched || 0) + (linkedResult?.stats?.mismatched || 0) + attachmentLog.filter(e => e.status !== 'saved').length;
     if (!fatal && !canceled && verificationWarnings && completionType === 'completed_without_errors') completionType = 'completed_with_verification_warnings';
+    // A folder that could not be read means items were never listed; the collection is not complete.
+    const folderFailures = errors.filter(e => e.type === 'folder_error').length;
+    if (!fatal && !canceled && folderFailures && !completionType.startsWith('completed_with_errors')) completionType = 'completed_with_errors_remaining_items';
     const status = canceled ? 'canceled'
       : fatal ? 'failed'
-      : failedAll > 0 && acquiredAll === 0 ? 'failed'
+      : (failedAll > 0 || folderFailures > 0) && acquiredAll === 0 ? 'failed'
       : completionType.startsWith('completed_with_errors') ? 'completed_with_errors'
       : 'completed';
     const projectStatus = status === 'canceled' ? 'canceled' : status === 'failed' ? 'failed' : 'completed';
@@ -1692,11 +1759,30 @@ async function runCollectionJob(ctx) {
       }, project.examiner_name, acquisitionId);
     }
 
+    if (snapshotComparison) {
+      fs.writeFileSync(path.join(logResult.logsDir, `folder_snapshots_${ts}.json`), JSON.stringify(snapshotComparison, null, 2));
+      addAuditEntry(project.id, 'FOLDER_SNAPSHOT', `Folder snapshots before and after the collection: ${snapshotComparison.changed ? `the mailbox changed (${snapshotComparison.messageDelta >= 0 ? '+' : ''}${snapshotComparison.messageDelta} messages)` : 'no change'}`, {
+        acquisitionId, ...snapshotComparison,
+      }, project.examiner_name, acquisitionId);
+    }
+
+    // A trusted timestamp over the list of collected hashes, from an outside authority. When none can be
+    // reached that is recorded as such; nothing stands in for it.
     let timestamp = null;
-    if (acquired > 0) {
-      const tsResult = TimestampService.timestampCollection(project.id, downloadedItems);
-      saveTimestampRecord(project.id, 'collection', tsResult.collectionDigest, tsResult.timestamp);
-      timestamp = tsResult.timestamp.genTime;
+    if (acquired > 0 && !canceled) {
+      progress.statusDetail = 'Requesting a trusted timestamp';
+      publish();
+      const record = await TimestampService.timestampCollection(project.id, downloadedItems, logResult.logsDir, ts);
+      saveRfc3161Timestamp(record);
+      timestamp = Rfc3161TimestampService.summarize(record);
+      live.write(record.status === 'verified'
+        ? `Trusted timestamp from ${record.tsaName}: ${record.genTime} (token ${record.tokenFile})`
+        : `No trusted timestamp: ${record.error}`);
+      addAuditEntry(project.id, record.status === 'verified' ? 'RFC3161_COLLECTION_TIMESTAMP' : 'RFC3161_TIMESTAMP_FAILED',
+        record.status === 'verified' ? `Collection timestamped by ${record.tsaName} at ${record.genTime}` : `Collection could not be timestamped: ${record.error}`,
+        { acquisitionId, targetHash: record.targetHash, targetFile: record.targetFile, tsa: record.tsaUrl, status: record.status, genTime: record.genTime || null, serialNumber: record.serialNumber || null, error: record.error || null, attempts: record.attempts },
+        project.examiner_name, acquisitionId);
+      progress.statusDetail = '';
     }
 
     // The formats chosen in the Workflow step are exported here, by the server, so they are produced even
@@ -1740,6 +1826,7 @@ async function runCollectionJob(ctx) {
       differential: !!differential, differentialFolder, scope, totalBytes, folderStats,
       sessionDir, destinationDir, mimeOutputDir: wantsEmail ? mimeDir : null, logsDir: logResult.logsDir, logFiles: logResult.files,
       errors: errors.slice(0, 50), timestamp,
+      folderSnapshot: snapshotComparison ? { changed: snapshotComparison.changed, messageDelta: snapshotComparison.messageDelta, foldersChanged: snapshotComparison.foldersChanged } : null,
       query: query ? {
         type: query.type, description: describeQuery(query), notes: queryPlan.notes, unsupported: unsupportedLabels,
         inlineMatchCount: queryPlan.inlineKeys.length ? inlineMatches.length : null,
@@ -1760,6 +1847,26 @@ async function runCollectionJob(ctx) {
     live.write(`Collection finished: ${completionType}`);
     return result;
   }
+}
+
+// Sends the completion e-mail the examiner set up. A failed notification is logged, never fatal.
+async function notifyByEmail(project, type, details, log = () => {}) {
+  let settings;
+  try {
+    settings = getSmtpSettings(project.id);
+  } catch (err) {
+    log(`Notification settings could not be read: ${err.message}`);
+    return;
+  }
+  if (!settings) return;
+  const wanted = type === 'export_complete' ? settings.notify_on_export : type === 'acquisition_error' ? settings.notify_on_error : settings.notify_on_complete;
+  if (!wanted) return;
+  const result = await AutomationService.sendNotification({
+    host: settings.host, port: settings.port, secure: !!settings.secure, username: settings.username,
+    password: decryptSecret(settings.password_encrypted), fromAddress: settings.from_address, toAddresses: settings.to_addresses,
+  }, { type, projectName: project.name, details });
+  log(result.success ? `Notification e-mail sent to ${result.recipients} recipient(s)` : `Notification e-mail failed: ${result.error}`);
+  addAuditEntry(project.id, result.success ? 'NOTIFICATION_SENT' : 'NOTIFICATION_FAILED', result.success ? `Notification (${type}) sent to ${result.recipients} recipient(s)` : `Notification (${type}) failed: ${result.error}`, { type, error: result.error || null }, project.examiner_name);
 }
 
 function driveResultLabel(protocol) {
@@ -1800,7 +1907,7 @@ router.post('/projects/:id/collect/estimate', async (req, res) => {
   try {
     if (request.wantsEmail) {
       if (supportsEngine(protocol)) {
-        handler = await createEngineHandler(protocol, config, project);
+        handler = await createHandler(protocol, config, project);
         await handler.connect();
         const folders = protocol === 'pop3' ? ['INBOX'] : (Array.isArray(req.body.folders) && req.body.folders.length ? req.body.folders : ['INBOX']);
         const { listings, rawTotal, duplicatesMerged, folderErrors } = await enumerateFolders({
@@ -1858,7 +1965,7 @@ router.get('/projects/:id/messages', (req, res) => {
     offset: parseInt(offset) || 0,
     search,
   });
-  const total = getMessageCount(req.params.id);
+  const total = getMessageCount(req.params.id, { folder, search });
   res.json({ messages, total });
 });
 
@@ -1876,7 +1983,17 @@ router.post('/projects/:id/inline-search', (req, res) => {
 
   const { query } = req.body;
   const messages = getAllProjectMessages(project.id);
-  const result = InlineSearchEngine.search(messages, query);
+  const attachmentsByMessage = new Map();
+  for (const a of getProjectAttachments(project.id)) {
+    if (!attachmentsByMessage.has(a.message_id)) attachmentsByMessage.set(a.message_id, []);
+    attachmentsByMessage.get(a.message_id).push(a.filename);
+  }
+  let result;
+  try {
+    result = InlineSearchEngine.search(messages, query, { attachmentsByMessage });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
 
   saveInlineSearch(project.id, query, result.stats.matched, result.stats.elapsed);
   addAuditEntry(project.id, 'INLINE_SEARCH', `Inline search: "${query}" — ${result.stats.matched} of ${result.stats.total} matched`, {
@@ -1922,84 +2039,31 @@ router.post('/projects/:id/search', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  const { criteria, queryType } = req.body;
+  const { criteria, queryType, config } = req.body;
 
   const dbResults = getMessages(project.id, {
     search: criteria.keyword || criteria.from || criteria.subject,
     folder: criteria.folder,
   });
 
-  let serverResult = { resultCount: 0, query: '', protocolLog: [] };
-
-  try {
-    switch (project.provider_type) {
-      case 'imap': {
-        const config = JSON.parse(project.config || '{}');
-        if (config.host) {
-          const handler = new ImapHandler(config);
-          await handler.connect();
-          const searchResult = await handler.serverSearch(criteria.folder || 'INBOX', criteria);
-          serverResult = {
-            query: JSON.stringify(criteria),
-            resultCount: searchResult.count,
-            uids: searchResult.uids,
-            protocolLog: handler.getProtocolLog(),
-          };
-          await handler.disconnect();
-        } else {
-          serverResult.query = JSON.stringify(criteria);
-          serverResult.note = 'IMAP SEARCH requires active connection with host configured';
-        }
-        break;
-      }
-      case 'ews': {
-        const ewsConfig = { email: project.target_email };
-        if (msGetAuthStatus().authorized) {
-          ewsConfig.authType = 'oauth2';
-          ewsConfig.accessToken = await msGetAccessToken();
-        }
-        const handler = new EwsHandler(ewsConfig);
-        await handler.connect();
-        serverResult = await handler.searchMailboxes(criteria);
-        serverResult.protocolLog = handler.getProtocolLog();
-        await handler.disconnect();
-        break;
-      }
-      case 'graph': {
-        const handler = new GraphHandler({ email: project.target_email, authType: 'delegated' });
-        await handler.connect();
-        serverResult = await handler.searchMessages(criteria);
-        serverResult.protocolLog = handler.getProtocolLog();
-        await handler.disconnect();
-        break;
-      }
-      case 'gmail_api': {
-        const handler = new GmailHandler({ email: project.target_email, authType: 'oauth2' });
-        await handler.connect();
-        serverResult = await handler.searchMessages(criteria);
-        serverResult.protocolLog = handler.getProtocolLog();
-        await handler.disconnect();
-        break;
-      }
-      case 'zoho_api': {
-        const handler = new ZohoHandler({ email: project.target_email });
-        await handler.connect();
-        serverResult = await handler.searchMessages(criteria);
-        serverResult.protocolLog = handler.getProtocolLog();
-        await handler.disconnect();
-        break;
-      }
-      case 'jmap': {
-        const handler = new JmapHandler({ email: project.target_email });
-        await handler.connect();
-        serverResult = await handler.searchMessages(criteria);
-        serverResult.protocolLog = handler.getProtocolLog();
-        await handler.disconnect();
-        break;
-      }
+  // Searching collected evidence must not log in to the custodian's mailbox. The live server is only asked
+  // when the request says so and carries the connection to use.
+  let serverResult = { resultCount: null, query: '', protocolLog: [] };
+  if (config) {
+    const protocol = config.protocol || project.provider_type;
+    let handler = null;
+    try {
+      handler = await createHandler(protocol, config, project);
+      await handler.connect();
+      serverResult = protocol === 'imap'
+        ? await handler.serverSearch(criteria.folder || 'INBOX', criteria).then(r => ({ query: JSON.stringify(criteria), resultCount: r.count, uids: r.uids }))
+        : await handler.searchMessages(criteria);
+      serverResult.protocolLog = handler.getProtocolLog();
+    } catch (err) {
+      serverResult.error = err.message;
+    } finally {
+      await handler?.disconnect?.().catch(() => {});
     }
-  } catch (err) {
-    serverResult.error = err.message;
   }
 
   const queryId = saveSearchQuery(project.id, queryType || 'keyword', serverResult.query || JSON.stringify(criteria), criteria);
@@ -2051,7 +2115,8 @@ router.post('/projects/:id/qc', async (req, res) => {
     const driveLinks = getDriveLinks(project.id);
     const scope = req.body?.scope === 'collection' ? 'collection' : 'full';
 
-    const results = await QualityControlService.runChecks(project, messages, acquisitions, folders, exports, { attachments, driveLinks, driveItems, scope, acquisitionId });
+    const auditChain = verifyAuditChain(getAuditLog(project.id));
+    const results = await QualityControlService.runChecks(project, messages, acquisitions, folders, exports, { attachments, driveLinks, driveItems, scope, acquisitionId, auditChain });
     saveQcResult(project.id, results);
 
     addAuditEntry(project.id, 'QC_COMPLETED', `Quality control (${scope}${acquisitionId ? `, acquisition ${acquisitionId}` : ''}): ${results.summary.passed} passed, ${results.summary.warnings} warnings, ${results.summary.failed} failed`, {
@@ -2079,8 +2144,9 @@ router.post('/projects/:id/cloud-scan', (req, res) => {
   const messages = getAllProjectMessages(project.id);
   const result = CloudAttachmentService.scanMessages(messages);
 
+  const known = new Set(getDriveLinks(project.id).map(l => `${l.message_id}|${l.url}`));
   for (const link of result.links) {
-    saveDriveLink({ ...link, projectId: project.id });
+    if (!known.has(`${link.messageId}|${link.url}`)) saveDriveLink({ ...link, projectId: project.id });
   }
 
   addAuditEntry(project.id, 'CLOUD_SCAN', `Cloud attachment scan: ${result.totalLinks} links found from ${result.totalProviders} provider(s)`, {
@@ -2100,39 +2166,50 @@ router.get('/cloud/providers', (req, res) => {
 });
 
 // ── RFC 3161 Timestamps ──
-router.post('/projects/:id/timestamp', (req, res) => {
+router.post('/projects/:id/timestamp', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  const { type } = req.body;
-  const messages = getAllProjectMessages(project.id);
-
-  let tsResult;
-  if (type === 'export') {
-    const exports = getExportRecords(project.id);
-    const latest = exports[0];
-    if (!latest) return res.status(400).json({ error: 'No exports to timestamp' });
-    tsResult = TimestampService.timestampExport(project.id, latest.id, {
-      manifestHash: latest.hash_sha256,
-      fileCount: latest.message_count,
-    });
-  } else {
-    tsResult = TimestampService.timestampCollection(project.id, messages);
+  const { type, tsaUrl } = req.body || {};
+  try {
+    let record;
+    if (type === 'export') {
+      const latest = getExportRecords(project.id)[0];
+      if (!latest) return res.status(400).json({ error: 'No exports to timestamp' });
+      if (!latest.output_dir || !fs.existsSync(path.join(latest.output_dir, 'manifest.txt'))) return res.status(400).json({ error: 'The latest export\'s manifest was not found' });
+      record = await TimestampService.timestampExport(project.id, latest.output_dir, { tsaUrl });
+    } else {
+      const messages = getAllProjectMessages(project.id);
+      if (!messages.length) return res.status(400).json({ error: 'No messages to timestamp. Collect messages first.' });
+      record = await TimestampService.timestampCollection(project.id, messages, path.join(DATA_DIR, 'projects', project.id, 'timestamps'), new Date().toISOString().replace(/[:.]/g, '-'), { tsaUrl });
+    }
+    saveRfc3161Timestamp(record);
+    addAuditEntry(project.id, record.status === 'verified' ? 'RFC3161_TIMESTAMP' : 'RFC3161_TIMESTAMP_FAILED',
+      record.status === 'verified' ? `Trusted timestamp (${type || 'collection'}) from ${record.tsaName} at ${record.genTime}` : `Trusted timestamp (${type || 'collection'}) failed: ${record.error}`,
+      { type: type || 'collection', targetHash: record.targetHash, targetFile: record.targetFile, tsa: record.tsaUrl, status: record.status, genTime: record.genTime || null, serialNumber: record.serialNumber || null, error: record.error || null, attempts: record.attempts },
+      project.examiner_name);
+    res.json({ ...Rfc3161TimestampService.summarize(record), type: type || 'collection', targetFile: record.targetFile, tokenFile: record.tokenFile || null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  saveTimestampRecord(project.id, tsResult.type, tsResult.collectionDigest || tsResult.manifestHash, tsResult.timestamp);
-
-  addAuditEntry(project.id, 'TIMESTAMP_CREATED', `RFC 3161 timestamp created: ${tsResult.type}`, {
-    type: tsResult.type,
-    genTime: tsResult.timestamp.genTime,
-    serialNumber: tsResult.timestamp.serialNumber,
-  }, project.examiner_name);
-
-  res.json(tsResult);
 });
 
-router.get('/projects/:id/timestamps', (req, res) => {
-  res.json(getTimestampRecords(req.params.id));
+// Trusted tokens, each re-verified against its target, plus how many old self-made records exist.
+router.get('/projects/:id/timestamps', async (req, res) => {
+  const rows = getRfc3161Timestamps(req.params.id);
+  const results = [];
+  for (const row of rows) {
+    const summary = Rfc3161TimestampService.summarize(row);
+    if (row.timestamp_token) {
+      const v = await Rfc3161TimestampService.verifyTimestamp(row.timestamp_token, row.target_hash, { tsaUrl: row.tsa_url });
+      summary.verifiedNow = v.valid;
+      summary.chainTrusted = v.chainTrusted;
+      summary.trustedRoot = v.trustedRoot || null;
+      summary.errors = v.errors;
+    }
+    results.push(summary);
+  }
+  res.json({ timestamps: results, legacyInternalRecords: getTimestampRecords(req.params.id).length });
 });
 
 router.get('/timestamp/info', (req, res) => {
@@ -2159,13 +2236,12 @@ router.get('/projects/:id/analytics/timeline', (req, res) => {
     buckets[dateKey].count++;
     buckets[dateKey].totalSize += msg.size || 0;
 
-    const fromAddr = (msg.from_address || '').toLowerCase();
     const targetEmail = (project.target_email || '').toLowerCase();
-    if (fromAddr.includes(targetEmail)) buckets[dateKey].sent++;
+    if (targetEmail && (msg.from_address || '').toLowerCase().includes(targetEmail)) buckets[dateKey].sent++;
     else buckets[dateKey].received++;
 
-    hourBuckets[d.getHours()]++;
-    dayOfWeekBuckets[d.getDay()]++;
+    hourBuckets[d.getUTCHours()]++;
+    dayOfWeekBuckets[d.getUTCDay()]++;
   }
 
   const timeline = Object.values(buckets).sort((a, b) => a.date.localeCompare(b.date));
@@ -2174,7 +2250,9 @@ router.get('/projects/:id/analytics/timeline', (req, res) => {
     timeline,
     hourDistribution: hourBuckets,
     dayOfWeekDistribution: dayOfWeekBuckets,
+    timeZone: 'UTC',
     totalMessages: messages.length,
+    undatedMessages: messages.filter(m => !m.date || isNaN(new Date(m.date).getTime())).length,
     dateRange: timeline.length > 0
       ? { from: timeline[0].date, to: timeline[timeline.length - 1].date }
       : null,
@@ -2190,8 +2268,12 @@ router.get('/projects/:id/analytics/relationships', (req, res) => {
   const pairMap = {};
   const contactMap = {};
 
+  const addressOf = (v) => {
+    const text = String(v || '').toLowerCase().trim();
+    return text.match(/<([^<>\s]+@[^<>\s]+)>/)?.[1] || text.match(/[^\s<>"',;]+@[^\s<>"',;]+/)?.[0] || text;
+  };
   for (const msg of messages) {
-    const from = (msg.from_address || '').toLowerCase().trim();
+    const from = addressOf(msg.from_address);
     if (!from) continue;
 
     if (!contactMap[from]) contactMap[from] = { address: from, sent: 0, received: 0, totalMessages: 0 };
@@ -2207,7 +2289,7 @@ router.get('/projects/:id/analytics/relationships', (req, res) => {
     const allRecipients = [...(Array.isArray(toAddrs) ? toAddrs : [toAddrs]), ...(Array.isArray(ccAddrs) ? ccAddrs : [])];
 
     for (const to of allRecipients) {
-      const toAddr = (to || '').toLowerCase().trim();
+      const toAddr = addressOf(to);
       if (!toAddr) continue;
 
       if (!contactMap[toAddr]) contactMap[toAddr] = { address: toAddr, sent: 0, received: 0, totalMessages: 0 };
@@ -2240,97 +2322,68 @@ router.get('/projects/:id/analytics/threading', (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const messages = getAllProjectMessages(project.id);
-  const byMsgId = {};
   const threads = [];
-  const orphans = [];
-
-  for (const msg of messages) {
-    if (msg.message_id) byMsgId[msg.message_id] = msg;
-  }
-
   const assigned = new Set();
-
-  function buildThread(root) {
-    const thread = [root];
-    assigned.add(root.id);
-    const children = messages.filter(m =>
-      !assigned.has(m.id) && (
-        (m.in_reply_to && m.in_reply_to === root.message_id) ||
-        (m.headers_json && (() => {
-          try {
-            const h = typeof m.headers_json === 'string' ? JSON.parse(m.headers_json) : m.headers_json;
-            const refs = h.references || h.References || '';
-            return refs.includes(root.message_id);
-          } catch { return false; }
-        })())
-      )
-    );
-    for (const child of children) {
-      thread.push(...buildThread(child));
-    }
-    return thread;
+  const parent = new Map(messages.map(m => [m.id, m.id]));
+  const find = (id) => {
+    let root = id;
+    while (parent.get(root) !== root) root = parent.get(root);
+    while (parent.get(id) !== root) { const next = parent.get(id); parent.set(id, root); id = next; }
+    return root;
+  };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
+  const byMessageId = new Map();
+  for (const m of messages) {
+    if (!m.message_id) continue;
+    if (!byMessageId.has(m.message_id)) byMessageId.set(m.message_id, m.id);
+    else union(byMessageId.get(m.message_id), m.id);
   }
-
-  for (const msg of messages) {
-    if (assigned.has(msg.id)) continue;
-    const isReply = msg.in_reply_to && byMsgId[msg.in_reply_to];
-    if (isReply) continue;
-
-    const thread = buildThread(msg);
-    if (thread.length > 1) {
-      threads.push({
-        rootMessageId: msg.message_id,
-        rootSubject: msg.subject,
-        rootFrom: msg.from_address,
-        rootDate: msg.date,
-        messageCount: thread.length,
-        participants: [...new Set(thread.map(m => m.from_address).filter(Boolean))],
-        dateRange: {
-          from: thread.reduce((min, m) => m.date && m.date < min ? m.date : min, thread[0]?.date || ''),
-          to: thread.reduce((max, m) => m.date && m.date > max ? m.date : max, thread[0]?.date || ''),
-        },
-        messages: thread.map(m => ({
-          id: m.id, subject: m.subject, from: m.from_address, date: m.date,
-          inReplyTo: m.in_reply_to, messageId: m.message_id
-        })),
-      });
-    }
+  for (const m of messages) {
+    const related = new Set(m.in_reply_to ? [m.in_reply_to] : []);
+    try {
+      const headers = JSON.parse(m.headers_json || '{}');
+      const refs = headers.references;
+      for (const r of Array.isArray(refs) ? refs : String(refs || '').split(/\s+/)) if (r) related.add(r);
+    } catch { /* a message with unreadable headers still threads by In-Reply-To */ }
+    for (const ref of related) if (byMessageId.has(ref)) union(m.id, byMessageId.get(ref));
   }
-
-  for (const msg of messages) {
-    if (!assigned.has(msg.id)) orphans.push(msg.id);
+  const groups = new Map();
+  for (const m of messages) {
+    const root = find(m.id);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(m);
   }
-
-  const subjectGroups = {};
-  for (const id of orphans) {
-    const msg = messages.find(m => m.id === id);
-    if (!msg) continue;
-    const normSubj = (msg.subject || '').replace(/^(Re|Fwd|Fw)\s*:\s*/gi, '').trim().toLowerCase();
-    if (!normSubj) continue;
-    if (!subjectGroups[normSubj]) subjectGroups[normSubj] = [];
-    subjectGroups[normSubj].push(msg);
-  }
-
-  for (const [, group] of Object.entries(subjectGroups)) {
+  const threadOf = (group, threadedBy) => {
+    const sorted = [...group].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    const dated = sorted.filter(m => m.date);
+    return {
+      rootMessageId: sorted[0].message_id,
+      rootSubject: sorted[0].subject,
+      rootFrom: sorted[0].from_address,
+      rootDate: sorted[0].date,
+      messageCount: sorted.length,
+      participants: [...new Set(sorted.map(m => m.from_address).filter(Boolean))],
+      dateRange: { from: dated[0]?.date || null, to: dated[dated.length - 1]?.date || null },
+      threadedBy,
+      messages: sorted.map(m => ({ id: m.id, subject: m.subject, from: m.from_address, date: m.date, inReplyTo: m.in_reply_to, messageId: m.message_id })),
+    };
+  };
+  const subjectGroups = new Map();
+  for (const group of groups.values()) {
     if (group.length > 1) {
-      group.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
-      threads.push({
-        rootMessageId: group[0].message_id,
-        rootSubject: group[0].subject,
-        rootFrom: group[0].from_address,
-        rootDate: group[0].date,
-        messageCount: group.length,
-        participants: [...new Set(group.map(m => m.from_address).filter(Boolean))],
-        dateRange: {
-          from: group[0].date,
-          to: group[group.length - 1].date,
-        },
-        threadedBy: 'subject',
-        messages: group.map(m => ({
-          id: m.id, subject: m.subject, from: m.from_address, date: m.date,
-          inReplyTo: m.in_reply_to, messageId: m.message_id
-        })),
-      });
+      threads.push(threadOf(group, 'headers'));
+      group.forEach(m => assigned.add(m.id));
+    } else {
+      const key = (group[0].subject || '').replace(/^((Re|Fwd|Fw)\s*:\s*)+/i, '').trim().toLowerCase();
+      if (key && key !== '(no subject)') {
+        if (!subjectGroups.has(key)) subjectGroups.set(key, []);
+        subjectGroups.get(key).push(group[0]);
+      }
+    }
+  }
+  for (const group of subjectGroups.values()) {
+    if (group.length > 1) {
+      threads.push(threadOf(group, 'subject'));
       group.forEach(m => assigned.add(m.id));
     }
   }
@@ -2456,35 +2509,49 @@ router.get('/projects/:id/messages/:msgId/headers', (req, res) => {
     if (dmarcMatch) authentication.dmarc = dmarcMatch[1].toLowerCase();
   }
 
+  const headerAddress = (value) => {
+    const v = Array.isArray(value) ? value[0] : value;
+    if (!v) return '';
+    if (typeof v === 'object') return (v.value?.[0]?.address || v.text || '').toLowerCase();
+    return (String(v).match(/[^\s<>"',;]+@[^\s<>"',;]+/)?.[0] || String(v)).toLowerCase();
+  };
+  const domainOf = address => address.includes('@') ? address.split('@').pop() : '';
+  const headerText = (value) => {
+    const v = Array.isArray(value) ? value[0] : value;
+    if (!v) return '';
+    return typeof v === 'object' ? (v.text || v.value?.[0]?.address || '') : String(v);
+  };
+
   const rawDkimSig = headers['dkim-signature'] || headers['DKIM-Signature'] || '';
   const dkimSig = Array.isArray(rawDkimSig) ? rawDkimSig[0] || '' : rawDkimSig;
-  const dkimDomain = dkimSig ? (String(dkimSig).match(/d=([^;\s]+)/)?.[1] || null) : null;
+  const dkimDomain = typeof dkimSig === 'object'
+    ? (dkimSig.params?.d || null)
+    : (dkimSig ? (String(dkimSig).match(/\bd=([^;\s]+)/)?.[1] || null) : null);
 
-  const rawReturnPath = headers['return-path'] || headers['Return-Path'] || '';
-  const returnPath = Array.isArray(rawReturnPath) ? rawReturnPath[0] || '' : String(rawReturnPath);
-  const rawReplyTo = headers['reply-to'] || headers['Reply-To'] || '';
-  const replyTo = Array.isArray(rawReplyTo) ? rawReplyTo[0] || '' : String(rawReplyTo);
-  const rawFrom = headers.from || headers.From || msg.from_address || '';
-  const fromHeader = Array.isArray(rawFrom) ? rawFrom[0] || '' : String(rawFrom);
+  const returnPath = headerText(headers['return-path'] || headers['Return-Path']);
+  const replyTo = headerText(headers['reply-to'] || headers['Reply-To']);
+  const fromAddress = headerAddress(headers.from || headers.From || msg.from_address);
+  const replyAddress = headerAddress(headers['reply-to'] || headers['Reply-To']);
+  const returnAddress = headerAddress(headers['return-path'] || headers['Return-Path']);
 
   const redFlags = [];
-  if (returnPath && fromHeader && !returnPath.toLowerCase().includes(fromHeader.toLowerCase().replace(/.*</, '').replace(/>.*/, '').split('@')[1] || '__none__')) {
-    redFlags.push({ type: 'RETURN_PATH_MISMATCH', description: 'Return-Path domain does not match From domain', severity: 'warning' });
+  if (returnAddress && domainOf(fromAddress) && domainOf(returnAddress) !== domainOf(fromAddress)) {
+    redFlags.push({ type: 'RETURN_PATH_MISMATCH', description: `Return-Path domain ${domainOf(returnAddress)} does not match From domain ${domainOf(fromAddress)}`, severity: 'warning' });
   }
-  if (replyTo && fromHeader && replyTo.toLowerCase() !== fromHeader.toLowerCase()) {
-    redFlags.push({ type: 'REPLY_TO_DIFFERS', description: 'Reply-To differs from From address', severity: 'info' });
+  if (replyAddress && fromAddress && replyAddress !== fromAddress) {
+    redFlags.push({ type: 'REPLY_TO_DIFFERS', description: `Reply-To ${replyAddress} differs from From ${fromAddress}`, severity: 'info' });
   }
   if (authentication.spf === 'fail' || authentication.spf === 'softfail') {
-    redFlags.push({ type: 'SPF_FAIL', description: `SPF check ${authentication.spf}ed — sender not authorized`, severity: 'critical' });
+    redFlags.push({ type: 'SPF_FAIL', description: `SPF result ${authentication.spf}: sender not authorized`, severity: 'critical' });
   }
   if (authentication.dkim === 'fail') {
-    redFlags.push({ type: 'DKIM_FAIL', description: 'DKIM signature verification failed — message may be altered', severity: 'critical' });
+    redFlags.push({ type: 'DKIM_FAIL', description: 'DKIM signature verification failed: message may be altered', severity: 'critical' });
   }
   if (authentication.dmarc === 'fail') {
     redFlags.push({ type: 'DMARC_FAIL', description: 'DMARC policy check failed', severity: 'critical' });
   }
-  if (dkimDomain && fromHeader && !fromHeader.toLowerCase().includes(dkimDomain.toLowerCase())) {
-    redFlags.push({ type: 'DKIM_DOMAIN_MISMATCH', description: `DKIM signed by ${dkimDomain} but From shows different domain`, severity: 'warning' });
+  if (dkimDomain && domainOf(fromAddress) && !domainOf(fromAddress).endsWith(dkimDomain.toLowerCase())) {
+    redFlags.push({ type: 'DKIM_DOMAIN_MISMATCH', description: `DKIM signed by ${dkimDomain} but From shows ${domainOf(fromAddress)}`, severity: 'warning' });
   }
 
   const hopCount = receivedHeaders.length;
@@ -2517,20 +2584,21 @@ router.get('/projects/:id/chain-of-custody', (req, res) => {
   const messages = getAllProjectMessages(project.id);
   const acquisitions = getAcquisitions(project.id);
   const exports = getExportRecords(project.id);
-  const timestamps = getTimestampRecords(project.id);
   const chainVerification = verifyAuditChain(auditLog);
 
   let config = {};
   try { config = JSON.parse(project.config || '{}'); } catch {}
 
+  const brokenEntries = new Set(chainVerification.breaks.map(b => b.entryId));
   const custodyEvents = auditLog.map(entry => ({
     timestamp: entry.timestamp,
     event: entry.event_type,
     description: entry.description,
     handler: entry.examiner || project.examiner_name || 'System',
     hashChain: entry.hash,
-    verified: true,
+    verified: !brokenEntries.has(entry.id),
   }));
+  const trustedTimestamps = getRfc3161Timestamps(req.params.id);
 
   const report = {
     reportGenerated: new Date().toISOString(),
@@ -2592,7 +2660,9 @@ router.get('/projects/:id/chain-of-custody', (req, res) => {
       totalBytes: e.total_bytes,
       hash: e.hash_sha256,
     })),
-    timestampRecords: timestamps.length,
+    timestampRecords: trustedTimestamps.filter(t => t.status === 'verified').length,
+    trustedTimestamps: trustedTimestamps.map(t => Rfc3161TimestampService.summarize(t)),
+    legacyInternalRecords: getTimestampRecords(project.id).length,
     standards: {
       collection: 'ISO/IEC 27037:2012 — Identification, collection, acquisition, preservation',
       hashing: 'NIST FIPS 180-4 (SHA-256/SHA-512)',
@@ -2600,7 +2670,7 @@ router.get('/projects/:id/chain-of-custody', (req, res) => {
       bestPractices: 'SWGDE 18-F-002-2.0 (2025) — Best Practices for Digital Evidence Collection',
       cloudEvidence: 'SWGDE 23-F-004-1.1 — Digital Evidence from Cloud Service Providers',
       principles: 'ACPO Good Practice Guide v5 (2012) — Four Principles for Digital Evidence',
-      timestamping: 'RFC 3161 Trusted Timestamping (structure; use production TSA for legal binding)',
+      timestamping: 'RFC 3161 tokens from an external Timestamp Authority, verified on receipt',
       admissibility: 'FRE 901(b)(9) — Process or System Producing Accurate Result',
       authentication: 'FRE 902(14) — Certified Data from Electronic Process',
       eDiscovery: 'EDRM Collection Standards — Repeatable processes with documented risks',
@@ -2648,14 +2718,26 @@ async function performExport(project, { format, outputDir: customOutputDir, pdfS
   const options = { provider: project.provider_type || 'Unknown', preserveFolders, project, acquisition: acquisitions[0] || {} };
   if (pdfSplitMode) options.pdfSplitMode = pdfSplitMode;
   if (format === 'pst') { options.pstMaxGb = pstSizeGb(pstMaxGb); options.onProgress = onProgress; }
+  if (format === 'pdf') {
+    options.attachmentsByMessage = new Map();
+    for (const a of getProjectAttachments(project.id)) {
+      if (!options.attachmentsByMessage.has(a.message_id)) options.attachmentsByMessage.set(a.message_id, []);
+      options.attachmentsByMessage.get(a.message_id).push(a);
+    }
+  }
   const { files, manifest, outputDir, reconstructed, failed = [], verificationFailures = [] } = await ExportService.exportToFiles(project.id, exportId, format, messages, folders, customOutputDir, options);
   const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
 
-  saveExportRecord(project.id, format, outputDir, messages.length, totalBytes, manifest.manifestHash);
+  saveExportRecord(project.id, format, outputDir, messages.length - failed.length, totalBytes, manifest.manifestHash);
   updateProjectStatus(project.id, 'exported');
 
-  const tsResult = TimestampService.timestampExport(project.id, exportId, manifest);
-  saveTimestampRecord(project.id, 'export', manifest.manifestHash, tsResult.timestamp);
+  const stamp = await TimestampService.timestampExport(project.id, outputDir);
+  saveRfc3161Timestamp(stamp);
+  const timestamp = Rfc3161TimestampService.summarize(stamp);
+  addAuditEntry(project.id, stamp.status === 'verified' ? 'RFC3161_TIMESTAMP' : 'RFC3161_TIMESTAMP_FAILED',
+    stamp.status === 'verified' ? `Export manifest timestamped by ${stamp.tsaName} at ${stamp.genTime}` : `Export manifest could not be timestamped: ${stamp.error}`,
+    { exportId, format, targetHash: stamp.targetHash, targetFile: stamp.targetFile, tsa: stamp.tsaUrl, status: stamp.status, genTime: stamp.genTime || null, serialNumber: stamp.serialNumber || null, error: stamp.error || null, attempts: stamp.attempts },
+    project.examiner_name);
 
   addAuditEntry(project.id, 'EXPORT_COMPLETED', `${label ? `${label}: ` : ''}Exported ${messages.length - failed.length} of ${messages.length} messages to ${format.toUpperCase()}${reconstructed?.length ? ` (${reconstructed.length} reconstructed: original file missing or altered)` : ''}${failed.length ? `; ${failed.length} not exported (see export_failed_items.csv)` : ''}${verificationFailures.length ? `; ${verificationFailures.length} file(s) FAILED read-back verification` : ''}`, {
     exportId, format, outputDir, messageCount: messages.length, totalBytes,
@@ -2663,17 +2745,19 @@ async function performExport(project, { format, outputDir: customOutputDir, pdfS
     reconstructed: reconstructed || [],
     failed, verificationFailures,
     fileHashes: files.map(f => ({ filename: f.relativePath || f.filename, md5: f.md5, sha1: f.sha1, sha256: f.hash })),
-    timestamp: tsResult.timestamp.genTime,
+    timestamp: stamp.genTime || null,
   }, project.examiner_name);
+  await notifyByEmail(project, 'export_complete', { format, messages: messages.length - failed.length, failed: failed.length, outputDir });
 
   return {
     exportId,
     format,
     files: files.map(f => ({
-      filename: f.filename || f.relativePath,
+      filename: f.relativePath || f.filename,
       size: f.size,
       hash: f.hash,
-      downloadUrl: `/api/projects/${project.id}/exports/${exportId}/files/${encodeURIComponent(f.filename || f.relativePath)}`,
+      // Exports to a chosen folder live there; only those in the data folder can be fetched by link.
+      downloadUrl: customOutputDir ? null : `/api/projects/${project.id}/exports/${exportId}/files/${encodeURIComponent(f.relativePath || f.filename)}`,
     })),
     manifest,
     messageCount: messages.length,
@@ -2683,7 +2767,7 @@ async function performExport(project, { format, outputDir: customOutputDir, pdfS
     failedCount: failed.length,
     failed: failed.slice(0, 100),
     verificationFailures,
-    timestamp: tsResult.timestamp,
+    timestamp,
   };
 }
 
@@ -2709,7 +2793,7 @@ router.get('/projects/:id/exports/:exportId/files/:filename', (req, res) => {
   const exportDir = path.resolve(DATA_DIR, 'exports', req.params.id, req.params.exportId);
   const filePath = path.resolve(exportDir, req.params.filename);
   if (!filePath.startsWith(exportDir + path.sep)) return res.status(400).json({ error: 'Invalid file name' });
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return res.status(404).json({ error: 'File not found' });
   res.download(filePath);
 });
 
@@ -2717,7 +2801,11 @@ router.get('/projects/:id/exports/:exportId/download-all', (req, res) => {
   const dir = path.join(DATA_DIR, 'exports', req.params.id, req.params.exportId);
   if (!fs.existsSync(dir)) return res.status(404).json({ error: 'Export not found' });
 
-  const files = fs.readdirSync(dir).map(f => ({
+  const walk = (rel) => fs.readdirSync(path.join(dir, rel), { withFileTypes: true }).flatMap(e => {
+    const name = path.join(rel, e.name);
+    return e.isDirectory() ? walk(name) : [name];
+  });
+  const files = walk('').map(f => ({
     filename: f,
     size: fs.statSync(path.join(dir, f)).size,
     downloadUrl: `/api/projects/${req.params.id}/exports/${req.params.exportId}/files/${encodeURIComponent(f)}`,
@@ -2751,7 +2839,7 @@ router.get('/projects/:id/verify', async (req, res) => {
   const messages = getAllProjectMessages(req.params.id);
   const auditLog = getAuditLog(req.params.id);
   const exports = getExportRecords(req.params.id);
-  const timestamps = getTimestampRecords(req.params.id);
+  const timestamps = getRfc3161Timestamps(req.params.id).filter(t => t.status === 'verified');
 
   const messageVerification = [];
   for (let i = 0; i < messages.length; i += 16) {
@@ -2775,7 +2863,7 @@ router.get('/projects/:id/verify', async (req, res) => {
   const exportVerification = [];
   for (const exp of exports) {
     if (exp.output_dir && fs.existsSync(exp.output_dir)) {
-      const result = ExportService.verifyExport(exp.output_dir);
+      const result = await ExportService.verifyExport(exp.output_dir);
       exportVerification.push({ exportId: exp.id, format: exp.format, ...result });
     } else {
       exportVerification.push({ exportId: exp.id, format: exp.format, valid: false, error: 'Export directory not found' });
@@ -2814,7 +2902,7 @@ router.get('/projects/:id/verify', async (req, res) => {
       bestPractices: 'SWGDE 18-F-002-2.0 (2025)',
       principles: 'ACPO Good Practice Guide v5 (2012)',
       legalStandard: 'FRE 901(b)(9) / FRE 902(14)',
-      timestampStandard: 'RFC 3161 (structure; use production TSA for legal binding)',
+      timestampStandard: 'RFC 3161 tokens from an external Timestamp Authority',
     },
   };
 
@@ -2844,28 +2932,14 @@ router.post('/projects/:id/rfc3161/timestamp', async (req, res) => {
   try {
     const project = getProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    const { targetType, targetHash, tsaUrl } = req.body;
+    const { targetType, targetHash, tsaUrl, hashAlgorithm } = req.body;
     if (!targetHash || !tsaUrl) return res.status(400).json({ error: 'targetHash and tsaUrl required' });
-    const result = await Rfc3161TimestampService.requestTimestamp(targetHash, tsaUrl, req.body);
+    const result = await Rfc3161TimestampService.requestTimestamp(targetHash, tsaUrl, { hashAlgorithm });
     result.projectId = req.params.id;
     result.targetType = targetType || 'manual';
     saveRfc3161Timestamp(result);
-    addAuditEntry(req.params.id, 'RFC3161_TIMESTAMP', `RFC 3161 timestamp requested from ${result.tsaName}`, { tsaUrl, targetType, status: result.status }, project.examiner_name);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.post('/projects/:id/rfc3161/timestamp-collection', async (req, res) => {
-  try {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const messages = getAllProjectMessages(req.params.id);
-    const { tsaUrl } = req.body;
-    if (!tsaUrl) return res.status(400).json({ error: 'tsaUrl required' });
-    const result = await Rfc3161TimestampService.timestampCollection(req.params.id, messages, tsaUrl, req.body);
-    saveRfc3161Timestamp(result);
-    addAuditEntry(req.params.id, 'RFC3161_COLLECTION_TIMESTAMP', `Collection timestamped via RFC 3161 (${messages.length} messages)`, { tsaUrl, messageCount: messages.length, status: result.status }, project.examiner_name);
-    res.json(result);
+    addAuditEntry(req.params.id, result.status === 'verified' ? 'RFC3161_TIMESTAMP' : 'RFC3161_TIMESTAMP_FAILED', result.status === 'verified' ? `RFC 3161 timestamp from ${result.tsaName} at ${result.genTime}` : `RFC 3161 timestamp from ${result.tsaName} failed: ${result.error}`, { tsaUrl, targetType, targetHash, status: result.status, genTime: result.genTime || null, serialNumber: result.serialNumber || null, error: result.error || null }, project.examiner_name);
+    res.json({ ...Rfc3161TimestampService.summarize(result), timestampToken: result.timestampToken || null });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -2900,17 +2974,26 @@ router.get('/hash/algorithms', (req, res) => {
 });
 
 // Feature 3: Folder Snapshots
-router.post('/projects/:id/snapshots', (req, res) => {
+router.post('/projects/:id/snapshots', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const { snapshotType, acquisitionId, config } = req.body || {};
+  if (!config) return res.status(400).json({ error: 'A snapshot reads the mailbox live: send the connection to use. Collections take their own snapshots before and after automatically.' });
+  let handler = null;
   try {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const folders = getFolders(req.params.id);
-    const { snapshotType, acquisitionId } = req.body;
+    handler = await createHandler(config.protocol || project.provider_type, config, project);
+    await handler.connect();
+    const folders = await listHandlerFolders(handler);
+    if (!folders) return res.status(400).json({ error: 'POP3 has no folders to take a snapshot of' });
     const snapshot = FolderSnapshotService.captureSnapshot(req.params.id, folders, acquisitionId, snapshotType || 'manual');
     saveFolderSnapshot(snapshot);
-    addAuditEntry(req.params.id, 'FOLDER_SNAPSHOT', `Folder snapshot captured (${snapshot.totalFolders} folders, ${snapshot.totalMessages} messages)`, { snapshotType: snapshotType || 'manual', totalFolders: snapshot.totalFolders }, project.examiner_name);
+    addAuditEntry(req.params.id, 'FOLDER_SNAPSHOT', `Folder snapshot captured (${snapshot.totalFolders} folders, ${snapshot.totalMessages} messages)`, { snapshotType: snapshotType || 'manual', totalFolders: snapshot.totalFolders, hash: snapshot.hashSha256 }, project.examiner_name);
     res.json(snapshot);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    await handler?.disconnect?.().catch(() => {});
+  }
 });
 
 router.get('/projects/:id/snapshots', (req, res) => {
@@ -2920,9 +3003,11 @@ router.get('/projects/:id/snapshots', (req, res) => {
 router.post('/projects/:id/snapshots/compare', (req, res) => {
   try {
     const snapshots = getFolderSnapshots(req.params.id);
-    if (snapshots.length < 2) return res.status(400).json({ error: 'Need at least 2 snapshots to compare' });
-    const pre = snapshots[snapshots.length - 1];
-    const post = snapshots[0];
+    const { firstId, secondId } = req.body || {};
+    // Newest first in the list: by default, the latest snapshot against the one before it.
+    const post = secondId ? snapshots.find(x => x.id === secondId) : snapshots[0];
+    const pre = firstId ? snapshots.find(x => x.id === firstId) : snapshots[1];
+    if (!pre || !post) return res.status(400).json({ error: 'Need 2 snapshots to compare' });
     res.json(FolderSnapshotService.compareSnapshots(pre, post));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -2959,87 +3044,85 @@ router.get('/enterprise/azure-environments', (req, res) => {
 router.post('/enterprise/authenticate', async (req, res) => {
   try {
     const { method } = req.body;
-    let result;
-    if (method === 'certificate') result = await EnterpriseAuthService.authenticateWithCertificate(req.body);
-    else result = await EnterpriseAuthService.authenticateAppOnly(req.body);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Feature 8: Remote Token Import
-router.post('/enterprise/import-token', async (req, res) => {
-  try {
-    const result = await EnterpriseAuthService.importToken(req.body.tokenData || req.body);
+    const result = method === 'certificate' ? await EnterpriseAuthService.authenticateWithCertificate(req.body) : await EnterpriseAuthService.authenticateAppOnly(req.body);
     res.json(result);
   } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
-// Feature 6: Exchange Advanced Features
-router.get('/projects/:id/exchange/recoverable-items', async (req, res) => {
+// Feature 8: Remote Token Import
+router.post('/enterprise/import-token', (req, res) => {
   try {
-    const result = await ExchangeAdvancedService.getRecoverableItems(null, req.query.email, req.query);
+    res.json(EnterpriseAuthService.importToken(req.body.tokenData || req.body));
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// Feature 6: Exchange Advanced Features. Each opens its own read-only EWS session with the connection sent.
+async function withEws(req, res, work) {
+  const project = req.params.id ? getProject(req.params.id) : null;
+  if (req.params.id && !project) return res.status(404).json({ error: 'Project not found' });
+  const config = req.body?.config;
+  if (!config) return res.status(400).json({ error: 'Send the Exchange connection to use (config)' });
+  let handler = null;
+  try {
+    handler = await createHandler('ews', config, project);
+    await handler.connect();
+    const email = config.targetUser || config.email || project?.target_email;
+    const result = await work(handler, email);
+    if (project) addAuditEntry(project.id, 'EXCHANGE_INSPECTED', `Exchange ${req.path.split('/').pop()} read`, { email, error: result.error || null }, project.examiner_name);
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    await handler?.disconnect?.().catch(() => {});
+  }
+}
 
-router.get('/projects/:id/exchange/public-folders', async (req, res) => {
-  try { res.json(await ExchangeAdvancedService.getPublicFolders(null, req.query)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.get('/projects/:id/exchange/archive', async (req, res) => {
-  try { res.json(await ExchangeAdvancedService.getArchiveMailbox(null, req.query.email, req.query)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.get('/projects/:id/exchange/inbox-rules', async (req, res) => {
-  try { res.json(await ExchangeAdvancedService.getInboxRules(null, req.query.email)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.get('/exchange/detect-version', async (req, res) => {
-  try { res.json(await ExchangeAdvancedService.detectExchangeVersion(req.query.host)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
+router.post('/projects/:id/exchange/recoverable-items', (req, res) => withEws(req, res, (h, email) => ExchangeAdvancedService.getRecoverableItems(h, email, req.body)));
+router.post('/projects/:id/exchange/public-folders', (req, res) => withEws(req, res, h => ExchangeAdvancedService.getPublicFolders(h)));
+router.post('/projects/:id/exchange/archive', (req, res) => withEws(req, res, (h, email) => ExchangeAdvancedService.getArchiveMailbox(h, email)));
+router.post('/projects/:id/exchange/inbox-rules', (req, res) => withEws(req, res, (h, email) => ExchangeAdvancedService.getInboxRules(h, email)));
+router.post('/exchange/detect-version', (req, res) => withEws(req, res, h => ExchangeAdvancedService.detectExchangeVersion(h)));
 
 // Feature 7: Local File Import (MBOX/PST/EML)
 router.post('/projects/:id/import', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (activeCollections.has(project.id)) return res.status(409).json({ error: 'Wait for the running collection to finish before importing' });
+  const { filePath, format, targetFolder, unquoteMbox } = req.body || {};
+  if (!filePath) return res.status(400).json({ error: 'Choose the file or folder to import' });
+  if (!fs.existsSync(filePath)) return res.status(400).json({ error: `Not found: ${filePath}` });
+
+  const isDirectory = fs.statSync(filePath).isDirectory();
+  const ext = (format || (isDirectory ? 'eml' : path.extname(filePath).slice(1))).toLowerCase();
+  const kind = { mbox: 'mbox', mbx: 'mbox', pst: 'pst', ost: 'pst', eml: 'eml' }[ext];
+  if (!kind) return res.status(400).json({ error: `Unsupported format: ${ext || 'unknown'}. Supported: mbox, pst, eml` });
+
+  const importId = `${kind}_${new Date().toISOString().replace(/[:.]/g, '-')}`;
+  const outputDir = path.join(DATA_DIR, 'imports', project.id, importId);
+  const acquisitionId = createAcquisition(project.id, [filePath], { scope: 'import', protocol: 'import', outputDir, examiner: project.examiner_name });
+  const options = { targetFolder: targetFolder || undefined, outputDir, acquisitionId, format: kind, unquoteMbox, save: batch => saveMessagesBatch(batch) };
   try {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const { filePath, format, targetFolder } = req.body;
-    if (!filePath) return res.status(400).json({ error: 'filePath required' });
-    if (!fs.existsSync(filePath)) return res.status(400).json({ error: 'File not found' });
-
-    let result;
-    const ext = (format || path.extname(filePath).slice(1)).toLowerCase();
-    if (ext === 'mbox' || ext === 'mbx') {
-      result = await LocalImportService.importMbox(filePath, req.params.id, { targetFolder });
-    } else if (ext === 'pst') {
-      if (activeCollections.has(project.id)) return res.status(409).json({ error: 'Wait for the running collection to finish before importing' });
-      const importId = `pst_${new Date().toISOString().replace(/[:.]/g, '-')}`;
-      result = await LocalImportService.importPst(filePath, req.params.id, {
-        targetFolder, outputDir: path.join(DATA_DIR, 'imports', req.params.id, importId), save: batch => saveMessagesBatch(batch),
-      });
-      addAuditEntry(req.params.id, 'PST_IMPORTED', `Imported ${result.successful} items from ${path.basename(filePath)}${result.failed ? ` (${result.failed} could not be read)` : ''}; rebuilt as EML from PST properties`, {
-        source: filePath, sourceSha256: result.sourceSha256, sourceUnchanged: result.sourceUnchanged, outputDir: result.outputDir, pstFormat: result.pstFormat, displayName: result.displayName, passwordProtected: result.passwordProtected,
-        successful: result.successful, failed: result.failed, folderErrors: result.folderErrors, errors: result.errors,
-      }, project.examiner_name);
-      return res.json(result);
-    } else if (ext === 'eml' || fs.statSync(filePath).isDirectory()) {
-      result = await LocalImportService.importEmlDirectory(filePath, req.params.id, { targetFolder });
-    } else {
-      return res.status(400).json({ error: `Unsupported format: ${ext}. Supported: mbox, pst, eml` });
-    }
-
-    for (const msg of result.messages.filter(m => !m.error)) {
-      saveMessage(msg);
-      if (msg.attachments) for (const att of msg.attachments) saveAttachment({ ...att, messageId: msg.id });
-    }
-
-    addAuditEntry(req.params.id, 'LOCAL_IMPORT', `Imported ${result.successful} messages from ${ext.toUpperCase()} file`, { source: filePath, format: ext, total: result.totalParsed || result.totalFiles, successful: result.successful, failed: result.failed }, project.examiner_name);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const result = kind === 'pst' ? await LocalImportService.importPst(filePath, project.id, options) : await LocalImportService.importMail(filePath, project.id, options);
+    const collected = getAllProjectMessages(project.id).filter(m => m.acquisition_id === acquisitionId);
+    const totalBytes = collected.reduce((sum, m) => sum + (m.size || 0), 0);
+    const status = !result.successful && (result.failed || result.folderErrors) ? 'failed' : (result.failed || result.folderErrors) ? 'completed_with_errors' : 'completed';
+    const completionType = status === 'completed' ? 'completed_without_errors' : status === 'failed' ? 'fatal_error' : 'completed_with_errors_remaining_items';
+    updateAcquisition(acquisitionId, {
+      status, completionType, sessionDir: outputDir, totalMessages: result.totalParsed, acquiredMessages: result.successful,
+      failedMessages: result.failed, skippedMessages: 0, totalBytes, errorLog: result.errors?.length ? result.errors : null,
+    });
+    updateProjectStatus(project.id, status === 'failed' ? 'failed' : 'completed');
+    addAuditEntry(project.id, kind === 'pst' ? 'PST_IMPORTED' : 'LOCAL_IMPORT', `Imported ${result.successful} messages from ${path.basename(filePath)}${result.failed ? ` (${result.failed} could not be read)` : ''}${kind === 'pst' ? '; rebuilt as EML from PST properties' : ''}`, {
+      source: filePath, format: kind, sourceSha256: result.sourceSha256 || null, sourceUnchanged: result.sourceUnchanged, outputDir, acquisitionId,
+      pstFormat: result.pstFormat, displayName: result.displayName, passwordProtected: result.passwordProtected,
+      successful: result.successful, failed: result.failed, folderErrors: result.folderErrors, errors: result.errors,
+    }, project.examiner_name, acquisitionId);
+    res.json({ ...result, acquisitionId, status });
+  } catch (err) {
+    updateAcquisition(acquisitionId, { status: 'failed', completionType: 'fatal_error', errorLog: [{ error: err.message }] });
+    addAuditEntry(project.id, 'IMPORT_FAILED', `Import of ${path.basename(filePath)} failed: ${err.message}`, { source: filePath, format: kind, acquisitionId }, project.examiner_name, acquisitionId);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/import/formats', (req, res) => {
@@ -3050,100 +3133,142 @@ router.get('/import/formats', (req, res) => {
 // ── CATEGORY 3: Cloud & Drive Collection (Features 10-15) ──
 // ══════════════════════════════════════════════════════════════
 
-// Feature 10: Google Drive Collection
-router.get('/projects/:id/drive/google/items', async (req, res) => {
+// The saved sign-in is used unless a token is sent; "accessToken" in a URL would end up in logs.
+const googleToken = req => req.body?.accessToken || getGoogleAccessToken();
+const microsoftToken = req => {
+  if (req.body?.enterpriseSessionId) {
+    const session = EnterpriseAuthService.getSession(req.body.enterpriseSessionId);
+    return session.tokenFor(session.graphEndpoint);
+  }
+  return req.body?.accessToken || msGetAccessToken();
+};
+
+// Listings are read-only and saved to the project, with the raw response in a hashed file where it is evidence.
+function projectOr404(req, res) {
+  const project = getProject(req.params.id);
+  if (!project) res.status(404).json({ error: 'Project not found' });
+  return project;
+}
+
+function saveRawListing(project, kind, raw) {
+  const dir = path.join(DATA_DIR, 'projects', project.id, 'cloud');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${kind}_${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+  const text = JSON.stringify(raw, null, 2);
+  fs.writeFileSync(file, text);
+  return { file, sha256: crypto.createHash('sha256').update(text).digest('hex') };
+}
+
+const cloudRoute = (work) => async (req, res) => {
+  const project = projectOr404(req, res);
+  if (!project) return;
   try {
-    const result = await CloudCollectionService.listGoogleDriveItems(req.query.accessToken, req.query);
-    for (const item of result.items) { item.projectId = req.params.id; saveDriveItem(item); }
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+    res.json(await work(project, req));
+  } catch (err) {
+    res.status(err.status === 401 || err.status === 403 ? 403 : 500).json({ error: err.status === 403 ? `${err.message}. This sign-in may need the extra permission for this data: sign in again with it.` : err.message });
+  }
+};
 
-router.get('/projects/:id/drive/google/shared-drives', async (req, res) => {
-  try { res.json(await CloudCollectionService.listGoogleSharedDrives(req.query.accessToken)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
+function saveListedDriveItems(project, items) {
+  const known = new Map(getDriveItems(project.id).map(d => [d.remote_id, d]));
+  for (const item of items) {
+    if (known.has(item.remoteId)) continue; // a collected file's record is not overwritten by a later listing
+    item.projectId = project.id;
+    saveDriveItem(item);
+  }
+}
 
-router.get('/projects/:id/drive/google/revisions/:fileId', async (req, res) => {
-  try { res.json(await CloudCollectionService.getGoogleDriveRevisions(req.query.accessToken, req.params.fileId)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
+// Feature 10: Google Drive Collection
+router.post('/projects/:id/drive/google/items', cloudRoute(async (project, req) => {
+  const result = await CloudCollectionService.listGoogleDriveItems(await googleToken(req), req.body || {});
+  saveListedDriveItems(project, result.items);
+  return result;
+}));
+router.post('/projects/:id/drive/google/shared-drives', cloudRoute(async (project, req) => CloudCollectionService.listGoogleSharedDrives(await googleToken(req))));
+router.post('/projects/:id/drive/google/revisions/:fileId', cloudRoute(async (project, req) => CloudCollectionService.getGoogleDriveRevisions(await googleToken(req), req.params.fileId)));
 
 // Feature 11: OneDrive Collection
-router.get('/projects/:id/drive/onedrive/items', async (req, res) => {
-  try {
-    const result = await CloudCollectionService.listOneDriveItems(req.query.accessToken, req.query);
-    for (const item of result.items) { item.projectId = req.params.id; saveDriveItem(item); }
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.get('/projects/:id/drive/onedrive/revisions/:itemId', async (req, res) => {
-  try { res.json(await CloudCollectionService.getOneDriveRevisions(req.query.accessToken, req.params.itemId, req.query.userId)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
+router.post('/projects/:id/drive/onedrive/items', cloudRoute(async (project, req) => {
+  const result = await CloudCollectionService.listOneDriveItems(await microsoftToken(req), req.body || {});
+  saveListedDriveItems(project, result.items);
+  return result;
+}));
+router.post('/projects/:id/drive/onedrive/revisions/:itemId', cloudRoute(async (project, req) => CloudCollectionService.getOneDriveRevisions(await microsoftToken(req), req.params.itemId, req.body?.userId)));
 
 // Feature 12: SharePoint Collection
-router.get('/projects/:id/drive/sharepoint/sites', async (req, res) => {
-  try { res.json(await CloudCollectionService.listSharePointSites(req.query.accessToken, req.query.search)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-router.get('/projects/:id/drive/sharepoint/documents/:siteId', async (req, res) => {
-  try { res.json(await CloudCollectionService.listSharePointDocuments(req.query.accessToken, req.params.siteId, req.query)); }
-  catch (err) { res.status(500).json({ error: err.message }); }
-});
+router.post('/projects/:id/drive/sharepoint/sites', cloudRoute(async (project, req) => CloudCollectionService.listSharePointSites(await microsoftToken(req), req.body?.search)));
+router.post('/projects/:id/drive/sharepoint/documents/:siteId', cloudRoute(async (project, req) => CloudCollectionService.listSharePointDocuments(await microsoftToken(req), req.params.siteId, req.body || {})));
 
 // Feature 13: Google Calendar Collection
-router.get('/projects/:id/calendar/events', async (req, res) => {
-  try {
-    const result = await CloudCollectionService.listGoogleCalendarEvents(req.query.accessToken, req.query);
-    for (const evt of result.events) { evt.projectId = req.params.id; saveCalendarEvent(evt); }
-    addAuditEntry(req.params.id, 'CALENDAR_COLLECTED', `Collected ${result.events.length} calendar events`);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+router.post('/projects/:id/calendar/events', cloudRoute(async (project, req) => {
+  const result = await CloudCollectionService.listGoogleCalendarEvents(await googleToken(req), req.body || {});
+  const stored = saveRawListing(project, 'google_calendar', result.raw);
+  for (const evt of result.events) { evt.projectId = project.id; saveCalendarEvent(evt); }
+  addAuditEntry(project.id, 'CALENDAR_COLLECTED', `Collected ${result.events.length} calendar events`, { file: stored.file, sha256: stored.sha256, count: result.events.length }, project.examiner_name);
+  return { events: result.events, file: stored.file, sha256: stored.sha256 };
+}));
 
 router.get('/projects/:id/calendar', (req, res) => {
   res.json(getCalendarEvents(req.params.id));
 });
 
 // Feature 14: Contact Collection
-router.get('/projects/:id/contacts/google', async (req, res) => {
-  try {
-    const result = await CloudCollectionService.listGoogleContacts(req.query.accessToken, req.query);
-    for (const c of result.contacts) { c.projectId = req.params.id; saveContact(c); }
-    addAuditEntry(req.params.id, 'CONTACTS_COLLECTED', `Collected ${result.contacts.length} Google contacts`);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+router.post('/projects/:id/contacts/google', cloudRoute(async (project, req) => {
+  const result = await CloudCollectionService.listGoogleContacts(await googleToken(req));
+  const stored = saveRawListing(project, 'google_contacts', result.raw);
+  for (const c of result.contacts) { c.projectId = project.id; saveContact(c); }
+  addAuditEntry(project.id, 'CONTACTS_COLLECTED', `Collected ${result.contacts.length} Google contacts`, { file: stored.file, sha256: stored.sha256, count: result.contacts.length }, project.examiner_name);
+  return { contacts: result.contacts, file: stored.file, sha256: stored.sha256 };
+}));
 
-router.get('/projects/:id/contacts/microsoft', async (req, res) => {
-  try {
-    const result = await CloudCollectionService.listMicrosoftContacts(req.query.accessToken, req.query);
-    for (const c of result.contacts) { c.projectId = req.params.id; saveContact(c); }
-    addAuditEntry(req.params.id, 'CONTACTS_COLLECTED', `Collected ${result.contacts.length} Microsoft contacts`);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+router.post('/projects/:id/contacts/microsoft', cloudRoute(async (project, req) => {
+  const result = await CloudCollectionService.listMicrosoftContacts(await microsoftToken(req), req.body || {});
+  const stored = saveRawListing(project, 'microsoft_contacts', result.raw);
+  for (const c of result.contacts) { c.projectId = project.id; saveContact(c); }
+  addAuditEntry(project.id, 'CONTACTS_COLLECTED', `Collected ${result.contacts.length} Microsoft contacts`, { file: stored.file, sha256: stored.sha256, count: result.contacts.length }, project.examiner_name);
+  return { contacts: result.contacts, file: stored.file, sha256: stored.sha256 };
+}));
 
 router.get('/projects/:id/contacts', (req, res) => {
   res.json(getContacts(req.params.id));
 });
 
-// Feature 15: Cloud Attachment Download Pipeline
+// Feature 15: Cloud Attachment Download Pipeline. The same verified downloader a collection uses, over
+// every message of the project; every link not downloaded is listed with the reason.
 router.post('/projects/:id/cloud-attachments/download', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (activeCollections.has(project.id)) return res.status(409).json({ error: 'Wait for the running collection to finish' });
+  const outDir = path.join(DATA_DIR, 'projects', project.id, 'linked_files', new Date().toISOString().replace(/[:.]/g, '-'));
   try {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const links = getDriveLinks(req.params.id);
-    if (links.length === 0) return res.json({ totalLinks: 0, downloaded: 0, message: 'No cloud links to download' });
-    const outputDir = path.join(DATA_DIR, 'projects', req.params.id);
-    const result = await CloudDownloadPipeline.processLinks(req.params.id, links, req.body.accessTokens || {}, outputDir);
-    for (const dl of result.results) saveCloudDownload(dl);
-    addAuditEntry(req.params.id, 'CLOUD_ATTACHMENTS_DOWNLOADED', `Downloaded ${result.downloaded} of ${result.totalLinks} cloud attachments`, { downloaded: result.downloaded, failed: result.failed, totalBytes: result.totalBytes }, project.examiner_name);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    fs.mkdirSync(outDir, { recursive: true });
+    const log = [];
+    const known = new Map();
+    const result = await collectLinkedFiles({
+      messages: getAllProjectMessages(project.id), outDir, progress: {}, log: line => log.push(line),
+      onRecord: r => {
+        for (const m of r.messages) {
+          const key = `${m.id}|${r.url}`;
+          if (known.has(key)) continue;
+          known.set(key, true);
+          saveDriveLink({ id: crypto.randomUUID(), projectId: project.id, messageId: m.id, provider: r.provider, url: r.url, fileId: r.fileId, status: r.status, downloadedAt: r.downloadedAt, localPath: r.localPath, size: r.size, sha256: r.sha256 });
+        }
+        saveCloudDownload({
+          id: r.id, projectId: project.id, provider: r.provider, remoteUrl: r.url, fileName: r.name, fileSize: r.size, mimeType: r.mimeType,
+          stage: r.status, localPath: r.localPath, hashMd5: r.md5, hashSha1: r.sha1, hashSha256: r.sha256,
+          error: r.status === 'downloaded' ? null : r.reason, startedAt: r.downloadedAt, completedAt: r.downloadedAt,
+        });
+      },
+    });
+    const manifest = writeLinkedFilesManifest(outDir, new Date().toISOString().replace(/[:.]/g, '-'), result);
+    addAuditEntry(project.id, 'CLOUD_ATTACHMENTS_DOWNLOADED', `Linked cloud files: ${result.stats.found} found, ${result.stats.downloaded} downloaded (${result.stats.verified} verified), ${result.stats.notDownloaded} not downloaded, ${result.stats.failed} failed`, { stats: result.stats, manifest }, project.examiner_name);
+    res.json({
+      stats: result.stats, outputDir: outDir, manifest,
+      notDownloaded: result.records.filter(r => !['downloaded', 'hash_mismatch'].includes(r.status)).slice(0, 100).map(r => ({ provider: r.providerLabel, url: r.url, name: r.name || null, reason: r.reason })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/projects/:id/cloud-downloads', (req, res) => {
@@ -3160,15 +3285,19 @@ router.get('/projects/:id/drive-items', (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // Feature 16: VHDX Container Export
-router.post('/projects/:id/export/vhdx', (req, res) => {
+router.post('/projects/:id/export/vhdx', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (activeCollections.has(project.id)) return res.status(409).json({ error: 'Wait for the running collection to finish before packaging' });
   try {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const exportDir = req.body.exportDir || path.join(DATA_DIR, 'exports', req.params.id);
-    if (!fs.existsSync(exportDir)) return res.status(400).json({ error: 'Export directory not found — run an export first' });
-    const outputPath = req.body.outputPath || path.join(DATA_DIR, 'exports', req.params.id, `evidence_${Date.now()}.vhdx`);
-    const result = ContainerService.createVhdxContainer(exportDir, outputPath, { label: project.name });
-    addAuditEntry(req.params.id, 'VHDX_CREATED', `VHDX container created (${result.fileCount} files, ${result.size} bytes)`, { outputPath, hashes: result.hashes }, project.examiner_name);
+    // By default the latest export; any folder can be chosen.
+    const sourceDir = req.body?.sourceDir || getExportRecords(project.id)[0]?.output_dir;
+    if (!sourceDir) return res.status(400).json({ error: 'Nothing to package: run an export first, or choose a folder' });
+    if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) return res.status(400).json({ error: `Folder not found: ${sourceDir}` });
+    const name = `${(project.name || 'evidence').replace(/[^\w.-]+/g, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}.vhdx`;
+    const outputPath = req.body?.outputPath || path.join(req.body?.outputDir || path.join(DATA_DIR, 'containers', project.id), name);
+    const result = await ContainerService.createVhdxContainer(sourceDir, outputPath, { label: project.case_id || project.name });
+    addAuditEntry(project.id, 'VHDX_CREATED', `VHDX container created from ${sourceDir} (${result.fileCount} files, ${result.size} bytes)`, { sourceDir, outputPath, hashes: result.hashes, contentsManifest: result.contentsManifest }, project.examiner_name);
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3238,31 +3367,63 @@ router.get('/projects/:id/reports/history', (req, res) => {
       const outDir = path.join(DATA_DIR, 'reports', req.params.id);
       fs.mkdirSync(outDir, { recursive: true });
       fs.writeFileSync(path.join(outDir, report.filename), report.content);
+      report.savedTo = path.join(outDir, report.filename);
     }
+    addAuditEntry(project.id, 'HISTORY_REPORT', 'History report generated', { hash: report.hash, entries: auditLog.length }, project.examiner_name);
     res.json(report);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Feature 19: Revision Report
-router.get('/projects/:id/reports/revisions', (req, res) => {
+router.get('/projects/:id/reports/revisions', async (req, res) => {
   try {
     const project = getProject(req.params.id);
     if (!project) return res.status(404).json({ error: 'Project not found' });
-    const driveItems = getDriveItems(req.params.id);
-    const report = ReportService.generateRevisionReport(project, driveItems, []);
-    res.json(report);
+    const driveItems = getDriveItems(req.params.id).filter(d => d.item_type !== 'folder');
+    // Read from the provider now, using the saved sign-in; a file that cannot be read is listed with the reason.
+    const revisions = [];
+    const notAvailable = [];
+    let googleAccess = null;
+    let msAccess = null;
+    for (const item of driveItems) {
+      try {
+        let rows;
+        if (item.provider === 'google_drive') {
+          googleAccess = googleAccess || await getGoogleAccessToken();
+          rows = await CloudCollectionService.getGoogleDriveRevisions(googleAccess, item.remote_id);
+        } else {
+          msAccess = msAccess || await msGetAccessToken();
+          rows = await CloudCollectionService.getOneDriveRevisions(msAccess, item.remote_id);
+        }
+        for (const r of rows) revisions.push({ ...r, driveItemId: item.id });
+      } catch (err) {
+        notAvailable.push({ name: item.path || item.name, error: err.message });
+      }
+    }
+    const report = ReportService.generateRevisionReport(project, driveItems, revisions, { notAvailable });
+    if (req.query.save === 'true') {
+      const outDir = path.join(DATA_DIR, 'reports', req.params.id);
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(path.join(outDir, report.filename), report.content);
+      report.savedTo = path.join(outDir, report.filename);
+    }
+    addAuditEntry(project.id, 'REVISION_REPORT', `Revision report: ${revisions.length} revisions of ${driveItems.length} files${notAvailable.length ? `, ${notAvailable.length} not readable` : ''}`, { hash: report.hash, notAvailable: notAvailable.length }, project.examiner_name);
+    res.json({ ...report, notAvailable });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Feature 20: Log Compression
-router.post('/projects/:id/logs/compress', async (req, res) => {
+router.post('/projects/:id/logs/compress', (req, res) => {
   try {
-    const logsDir = req.body.logsDir || path.join(DATA_DIR, 'logs', req.params.id);
-    const outputPath = req.body.outputPath || path.join(DATA_DIR, 'exports', req.params.id, `logs_${Date.now()}.zip`);
-    const result = await ReportService.compressLogs(req.params.id, logsDir, outputPath);
-    if (result.compressed) {
-      addAuditEntry(req.params.id, 'LOGS_COMPRESSED', `${result.fileCount} log files compressed`, { outputPath, hash: result.hash });
-    }
+    const project = getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    // Logs sit with each collection (<session or destination>\\Logs), wherever that was.
+    const sources = req.body?.logsDir
+      ? [{ dir: req.body.logsDir, prefix: '' }]
+      : getAcquisitions(project.id).filter(a => a.session_dir).map(a => ({ dir: path.join(a.session_dir, 'Logs'), prefix: `acquisition_${a.id.slice(0, 8)}` }));
+    const outputPath = req.body?.outputPath || path.join(DATA_DIR, 'reports', project.id, `logs_${new Date().toISOString().replace(/[:.]/g, '-')}.zip`);
+    const result = ReportService.compressLogs(project.id, sources, outputPath);
+    if (result.compressed) addAuditEntry(project.id, 'LOGS_COMPRESSED', `${result.fileCount} log files compressed`, { outputPath, hash: result.hash }, project.examiner_name);
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3272,16 +3433,48 @@ router.post('/projects/:id/logs/compress', async (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // Feature 21: Pre-Acquisition Server-Side Search
+// Asks the server how many items a query matches, without downloading anything: the same query and
+// enumeration a collection uses, for protocols that can list; the provider's own search for the rest.
 router.post('/projects/:id/search/pre-acquisition', async (req, res) => {
-  try {
-    const project = getProject(req.params.id);
-    if (!project) return res.status(404).json({ error: 'Project not found' });
-    const result = await AdvancedSearchService.preAcquisitionSearch({ client: null }, req.body.criteria || req.body);
-    result.projectId = req.params.id;
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  const { config, folders, query } = req.body || {};
+  if (!config) return res.status(400).json({ error: 'Send the connection to search with (config)' });
+  const protocol = config.protocol || project.provider_type;
+  let handler = null;
+  const saveAndAudit = (result) => {
     savePreAcquisitionSearch(result);
-    addAuditEntry(req.params.id, 'PRE_ACQUISITION_SEARCH', `Pre-acquisition search: ${result.resultCount} matches`, { criteria: req.body.criteria || req.body, resultCount: result.resultCount });
+    addAuditEntry(project.id, 'PRE_ACQUISITION_SEARCH', result.error ? `Pre-acquisition search failed: ${result.error}` : `Pre-acquisition search: ${result.resultCount} matches`, { query, resultCount: result.resultCount, error: result.error || null }, project.examiner_name);
+  };
+  try {
+    const normalized = normalizeQuery(query);
+    const plan = planQuery(protocol, normalized);
+    handler = await createHandler(protocol, config, project);
+    await handler.connect();
+    const result = { id: crypto.randomUUID(), projectId: project.id, criteria: query, protocol, uids: [], resultCount: 0, queryDescription: describeQuery(normalized), notes: plan.notes, unsupported: plan.unsupported.map(k => describeKeys([k])), checkedAfterDownload: plan.localKeys.length > 0 };
+    if (supportsEngine(protocol)) {
+      const targets = protocol === 'pop3' ? ['INBOX'] : (Array.isArray(folders) && folders.length ? folders : ['INBOX']);
+      const { listings, folderErrors, duplicatesMerged } = await enumerateFolders({ primary: handler, folders: targets, searchCriteria: plan.server });
+      result.resultCount = listings.reduce((sum, l) => sum + l.refs.length, 0);
+      result.uids = listings.flatMap(l => l.refs.map(r => r.serviceId || r.uid));
+      result.folders = listings.map(l => ({ folder: l.folder, items: l.refs.length }));
+      result.duplicatesMerged = duplicatesMerged;
+      if (folderErrors.length) {
+        result.folderErrors = folderErrors.map(f => ({ folder: f.folder, error: f.error.message }));
+        result.error = `${folderErrors.length} folder(s) could not be searched: ${folderErrors[0].folder}: ${folderErrors[0].error.message}`;
+      }
+    } else {
+      const found = await handler.searchMessages({ keyword: normalized?.keywords?.join(' '), from: normalized?.from?.[0], subject: normalized?.subject?.[0], since: normalized?.dateFrom, before: normalized?.dateTo });
+      result.resultCount = found.resultCount;
+    }
+    result.protocolLog = handler.getProtocolLog();
+    saveAndAudit(result);
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    await handler?.disconnect?.().catch(() => {});
+  }
 });
 
 router.get('/projects/:id/search/pre-acquisition', (req, res) => {
@@ -3293,6 +3486,7 @@ router.post('/projects/:id/search/index', (req, res) => {
   try {
     const messages = getAllProjectMessages(req.params.id);
     let indexed = 0;
+    clearSearchIndex(req.params.id);
     for (const msg of messages) {
       indexMessage(req.params.id, msg.id, {
         subject: msg.subject,
@@ -3324,13 +3518,13 @@ router.get('/projects/:id/differential/plan', (req, res) => {
   try {
     const messages = getAllProjectMessages(req.params.id);
     const folders = getFolders(req.params.id);
-    const plan = AdvancedSearchService.computeDifferentialPlan(messages, folders);
-    res.json(plan);
+    res.json(computeDifferentialPlan(messages, folders));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// What a differential collection would skip: the identifiers of everything already collected.
 router.get('/projects/:id/differential/ids', (req, res) => {
-  res.json(getDifferentialIds(req.params.id));
+  res.json(getProjectMessageKeys(req.params.id));
 });
 
 // ══════════════════════════════════════════════════════════════
@@ -3340,7 +3534,16 @@ router.get('/projects/:id/differential/ids', (req, res) => {
 // Feature 24: SMTP Notifications
 router.post('/notifications/smtp/settings', (req, res) => {
   try {
-    const settings = { id: req.body.id || crypto.randomUUID(), ...req.body };
+    const b = req.body || {};
+    if (!b.host) return res.status(400).json({ error: 'SMTP host is required' });
+    const to = Array.isArray(b.toAddresses) ? b.toAddresses : String(b.toAddresses || '').split(/[,;\s]+/).filter(Boolean);
+    if (!to.length || !b.fromAddress) return res.status(400).json({ error: 'From and To addresses are required' });
+    deleteSmtpSettings(b.projectId || null);
+    const settings = {
+      id: b.id || crypto.randomUUID(), projectId: b.projectId || null, host: b.host, port: Number(b.port) || 587, secure: !!b.secure, username: b.username || null,
+      passwordEncrypted: encryptSecret(b.password), fromAddress: b.fromAddress, toAddresses: to,
+      notifyOnComplete: b.notifyOnComplete !== false, notifyOnError: b.notifyOnError !== false, notifyOnExport: !!b.notifyOnExport,
+    };
     saveSmtpSettings(settings);
     res.json({ success: true, id: settings.id });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -3354,18 +3557,20 @@ router.get('/notifications/smtp/settings/:projectId', (req, res) => {
 
 router.post('/notifications/smtp/test', async (req, res) => {
   try {
-    const result = await AutomationService.sendNotification(req.body, {
+    const b = req.body || {};
+    const to = Array.isArray(b.toAddresses) ? b.toAddresses : String(b.toAddresses || '').split(/[,;\s]+/).filter(Boolean);
+    const result = await AutomationService.sendNotification({ ...b, toAddresses: to }, {
       type: 'test',
       projectName: 'Test Notification',
       details: { message: 'This is a test notification from SherlockMail' },
     });
-    res.json(result);
+    res.status(result.success ? 200 : 502).json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // Feature 25: CLI Commands Info
 router.get('/cli/commands', (req, res) => {
-  res.json(AutomationService.getCliCommands());
+  res.json(CLI_COMMANDS);
 });
 
 // Feature 26: Health Monitoring
@@ -3393,14 +3598,17 @@ router.get('/projects/:id/insights', (req, res) => {
 });
 
 // Feature 28: Multi-Target Acquisition
-router.post('/acquisitions/batch', (req, res) => {
+// Creates one project per mailbox and, when "start" is set, collects them one after another. Passwords in a
+// target's config stay in memory for the run; the saved record has none.
+router.post('/acquisitions/batch', async (req, res) => {
   try {
-    const { targets } = req.body;
+    const { targets, start } = req.body;
     if (!targets || !targets.length) return res.status(400).json({ error: 'targets array required' });
     const batch = AutomationService.createBatch(targets);
-    for (const target of batch.targets) {
+    const runs = [];
+    batch.targets.forEach((target, i) => {
       const project = createProject({
-        name: `Batch — ${target.targetEmail}`,
+        name: `Batch ${batch.batchId.slice(0, 8)} ${target.targetEmail}`,
         targetEmail: target.targetEmail,
         providerType: target.providerType,
         caseName: req.body.caseName,
@@ -3408,11 +3616,36 @@ router.post('/acquisitions/batch', (req, res) => {
         examinerName: req.body.examinerName,
       });
       target.projectId = project.id;
-      saveAcquisitionTarget(target);
-    }
-    res.json(batch);
+      const { password, accessToken, ...safeConfig } = target.config || {};
+      saveAcquisitionTarget({ ...target, config: safeConfig });
+      runs.push({ target, project, request: targets[i] });
+    });
+    if (start) runBatch(runs);
+    res.json({ ...batch, started: !!start, targets: batch.targets.map(({ config, ...t }) => t) });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
+async function runBatch(runs) {
+  for (const { target, project, request } of runs) {
+    updateAcquisitionTarget(target.id, { status: 'running', startedAt: new Date().toISOString() });
+    try {
+      const started = await startCollection(project, {
+        config: { protocol: target.providerType, email: target.targetEmail, ...(request.config || {}) },
+        folders: request.folders, outputDir: request.outputDir, query: request.query, scope: request.scope,
+      });
+      if (started.status !== 202) throw new Error(started.body.error);
+      updateAcquisitionTarget(target.id, { acquisitionId: started.body.acquisitionId });
+      await started.job.done;
+      const result = collectionProgress.get(project.id)?.result;
+      updateAcquisitionTarget(target.id, {
+        status: result?.status === 'completed' ? 'completed' : result?.status === 'completed_with_errors' ? 'completed_with_errors' : 'failed',
+        completedAt: new Date().toISOString(), error: result?.error || null,
+      });
+    } catch (err) {
+      updateAcquisitionTarget(target.id, { status: 'failed', completedAt: new Date().toISOString(), error: err.message });
+    }
+  }
+}
 
 router.get('/acquisitions/batch/:batchId', (req, res) => {
   res.json(getAcquisitionTargets(req.params.batchId));
@@ -3423,7 +3656,7 @@ router.post('/connectivity/test', async (req, res) => {
   try {
     const { host, port, protocol } = req.body;
     if (!host) return res.status(400).json({ error: 'host required' });
-    const result = await AutomationService.testConnectivity(host, port || 993, protocol || 'imaps', req.body);
+    const result = await AutomationService.testConnectivity(host, port || 993, protocol || null, req.body);
     if (req.body.projectId) { result.projectId = req.body.projectId; saveConnectivityTest(result); }
     res.json(result);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -3434,12 +3667,19 @@ router.get('/projects/:id/connectivity/tests', (req, res) => {
 });
 
 // Feature 30: Proxy Support
+// The default proxy takes effect at once for every new connection, and again each time the app starts.
 router.post('/proxy/settings', (req, res) => {
   try {
-    const proxy = { id: crypto.randomUUID(), ...req.body };
+    const b = req.body || {};
+    const proxyType = b.proxyType || 'none';
+    const proxy = { id: crypto.randomUUID(), name: b.name || `${proxyType} ${b.host || ''}`.trim(), proxyType, host: b.host || null, port: Number(b.port) || null, username: b.username || null, passwordEncrypted: encryptSecret(b.password), isDefault: b.isDefault !== false };
+    if (proxy.isDefault) {
+      applyProxy({ proxyType, host: proxy.host, port: proxy.port, username: proxy.username, password: b.password });
+      for (const old of getProxySettings().filter(p => p.is_default)) saveProxySettings({ id: old.id, name: old.name, proxyType: old.proxy_type, host: old.host, port: old.port, username: old.username, passwordEncrypted: old.password_encrypted, isDefault: false });
+    }
     saveProxySettings(proxy);
-    res.json({ success: true, id: proxy.id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    res.json({ success: true, id: proxy.id, active: describeProxy() });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 router.get('/proxy/settings', (req, res) => {
@@ -3479,30 +3719,85 @@ router.get('/server-profiles/:domain', (req, res) => {
 // ══════════════════════════════════════════════════════════════
 
 // Feature 32: S/MIME Decryption
+function evidenceBytes(req) {
+  if (req.body?.messageId) {
+    const msg = getMessage(req.body.messageId);
+    if (!msg || msg.project_id !== req.params.id) throw Object.assign(new Error('Message not found'), { status: 404 });
+    if (!msg.eml_path || !fs.existsSync(msg.eml_path)) throw Object.assign(new Error('The collected file for this message is missing'), { status: 404 });
+    return { raw: fs.readFileSync(msg.eml_path), msg };
+  }
+  if (req.body?.content) return { raw: Buffer.from(req.body.content, 'base64'), msg: null };
+  throw Object.assign(new Error('Send messageId or content (base64)'), { status: 400 });
+}
+
+function storedCertificates(projectId) {
+  return getCertificates(projectId).map(c => {
+    let material = {};
+    try { material = JSON.parse(c.pem_data || '{}'); } catch { /* not a stored pair */ }
+    return { id: c.id, subject: c.subject, certType: c.cert_type, certificatePem: material.certificatePem, privateKeyPem: decryptSecret(material.privateKey), passphrase: decryptSecret(material.passphrase) };
+  });
+}
+
+// Feature 32: S/MIME Decryption. The evidence file is not touched; the decrypted message is saved as a
+// derived copy, its hash recorded in the audit log.
 router.post('/projects/:id/crypto/decrypt', async (req, res) => {
   try {
-    const certs = getCertificates(req.params.id);
-    const result = await CryptoService.decryptMessage(req.body.content, certs);
-    res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const project = getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const { raw, msg } = evidenceBytes(req);
+    const inline = req.body.privateKeyPem ? [{ certificatePem: req.body.certificatePem, privateKeyPem: req.body.privateKeyPem, passphrase: req.body.passphrase, subject: 'key supplied for this request' }] : [];
+    const stored = storedCertificates(project.id).filter(c => c.privateKeyPem && (!req.body.certificateId || c.id === req.body.certificateId));
+    const result = CryptoService.decryptMessage(raw, [...inline, ...stored]);
+    const { decryptedContent, ...response } = result;
+    if (result.decrypted) {
+      const dir = path.join(DATA_DIR, 'projects', project.id, 'decrypted');
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, `${msg?.id || result.id}_decrypted.eml`);
+      fs.writeFileSync(file, decryptedContent);
+      response.outputPath = file;
+      response.sha256 = crypto.createHash('sha256').update(decryptedContent).digest('hex');
+      const parsed = await simpleParser(decryptedContent, { skipImageLinks: true }).catch(() => null);
+      response.preview = { subject: parsed?.subject || msg?.subject || null, text: parsed?.text || decryptedContent.toString('utf8') };
+      addAuditEntry(project.id, 'MESSAGE_DECRYPTED', `Decrypted a copy of "${msg?.subject || 'message'}" with ${result.certificateUsed?.subject || 'a supplied key'}`, { messageId: msg?.id || null, sourceSha256: crypto.createHash('sha256').update(raw).digest('hex'), outputPath: file, sha256: response.sha256, algorithm: result.encryptionAlgorithm }, project.examiner_name);
+    }
+    res.json(response);
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 // Feature 33: Digital Signature Verification
 router.post('/projects/:id/crypto/verify-signature', async (req, res) => {
   try {
-    const result = await CryptoService.verifySignature(req.body.content, req.body.options);
+    const project = getProject(req.params.id);
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    const { raw, msg } = evidenceBytes(req);
+    const extraCaPems = storedCertificates(project.id).filter(c => c.certType === 'ca' && c.certificatePem).map(c => c.certificatePem);
+    const result = CryptoService.verifySignature(raw, { extraCaPems });
+    if (msg && result.signed) addAuditEntry(project.id, 'SIGNATURE_CHECKED', `Signature of "${msg.subject}": ${result.signatureValid === true ? 'valid' : result.signatureValid === false ? 'NOT valid' : 'not verified'}${result.signatureValid === true && !result.chainTrusted ? ' (signer not chained to a trusted root)' : ''}`, { messageId: msg.id, signatureValid: result.signatureValid, chainTrusted: result.chainTrusted, signer: result.signerInfo?.subject || null }, project.examiner_name);
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
-// Certificate management
+// Certificate management. The private key, when given, is stored encrypted.
 router.post('/certificates', (req, res) => {
   try {
-    const cert = { id: crypto.randomUUID(), ...req.body };
+    const { certificatePem, privateKeyPem, passphrase, certType, projectId } = req.body || {};
+    if (!certificatePem) return res.status(400).json({ error: 'certificatePem is required' });
+    const x509 = new crypto.X509Certificate(certificatePem);
+    if (privateKeyPem) {
+      const key = crypto.createPrivateKey(passphrase ? { key: privateKeyPem, passphrase } : privateKeyPem);
+      if (!x509.checkPrivateKey(key)) return res.status(400).json({ error: 'This private key does not belong to this certificate' });
+    }
+    const cert = {
+      id: crypto.randomUUID(), projectId: projectId || null, subject: x509.subject.replace(/\n/g, ', '), issuer: x509.issuer.replace(/\n/g, ', '), serialNumber: x509.serialNumber,
+      thumbprintSha256: x509.fingerprint256, notBefore: new Date(x509.validFrom).toISOString(), notAfter: new Date(x509.validTo).toISOString(),
+      keyUsage: (x509.keyUsage || []).join(','), emailAddress: x509.subjectAltName?.match(/email:([^,\s]+)/)?.[1] || null,
+      certType: certType || (privateKeyPem ? 'smime_encrypt' : 'ca'),
+      pemData: JSON.stringify({ certificatePem, privateKey: encryptSecret(privateKeyPem), passphrase: encryptSecret(passphrase) }),
+    };
     saveCertificate(cert);
-    addAuditEntry(req.body.projectId, 'CERTIFICATE_IMPORTED', `Certificate imported: ${cert.subject || cert.email_address || 'unknown'}`, { certType: cert.certType, thumbprint: cert.thumbprintSha256 });
-    res.json({ success: true, id: cert.id });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    if (projectId) addAuditEntry(projectId, 'CERTIFICATE_IMPORTED', `Certificate imported: ${cert.subject}`, { certType: cert.certType, thumbprint: cert.thumbprintSha256, hasPrivateKey: !!privateKeyPem });
+    res.json({ success: true, id: cert.id, subject: cert.subject, thumbprint: cert.thumbprintSha256, hasPrivateKey: !!privateKeyPem });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 router.get('/certificates', (req, res) => {
@@ -3517,7 +3812,7 @@ router.post('/credentials', (req, res) => {
     const { label, credentialType, targetHost, username, password, masterKey } = req.body;
     if (!label || !credentialType || !password || !masterKey) return res.status(400).json({ error: 'label, credentialType, password, masterKey required' });
     const encrypted = CryptoService.encryptCredential(password, masterKey);
-    const cred = { id: crypto.randomUUID(), label, credentialType, targetHost, username, ...encrypted, metadata: req.body.metadata || {} };
+    const cred = { id: crypto.randomUUID(), label, credentialType, targetHost, username, ...encrypted, metadata: { ...(req.body.metadata || {}), salt: encrypted.salt } };
     saveCredential(cred);
     res.json({ success: true, id: cred.id });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -3533,7 +3828,9 @@ router.post('/credentials/:id/decrypt', (req, res) => {
     if (!cred) return res.status(404).json({ error: 'Credential not found' });
     const { masterKey } = req.body;
     if (!masterKey) return res.status(400).json({ error: 'masterKey required' });
-    const decrypted = CryptoService.decryptCredential(cred.encrypted_data, cred.iv, cred.auth_tag, masterKey);
+    let salt = null;
+    try { salt = JSON.parse(cred.metadata_json || '{}').salt || null; } catch { /* entries from before salting have none */ }
+    const decrypted = CryptoService.decryptCredential(cred.encrypted_data, cred.iv, cred.auth_tag, masterKey, salt);
     res.json({ id: cred.id, label: cred.label, decrypted });
   } catch (err) { res.status(400).json({ error: 'Decryption failed — wrong master key?' }); }
 });
@@ -3623,53 +3920,45 @@ router.get('/metadata-export/types', (req, res) => {
   res.json(MetadataExportService.getAvailableExportTypes());
 });
 
+function metadataRows(projectId, type) {
+  switch (type) {
+    case 'email': return getAllProjectMessages(projectId);
+    case 'attachment': return getProjectAttachments(projectId);
+    case 'calendar': return getCalendarEvents(projectId);
+    case 'contact': return getContacts(projectId);
+    case 'drive': return getDriveItems(projectId);
+    case 'document': return getDriveItems(projectId).filter(d => d.item_type !== 'folder');
+    case 'audit': return getAuditLog(projectId);
+    case 'timestamp': return getRfc3161Timestamps(projectId);
+    case 'snapshot': return getFolderSnapshots(projectId);
+    case 'hash': return [
+      ...getAllProjectMessages(projectId).map(m => ({ ...m, type: 'email' })),
+      ...getProjectAttachments(projectId).map(a => ({ ...a, type: 'attachment' })),
+      ...getDriveItems(projectId).filter(d => d.hash_sha256).map(d => ({ ...d, type: 'drive' })),
+    ];
+    default: throw httpError(400, `Unknown type: ${type}`);
+  }
+}
+
 router.post('/projects/:id/metadata-export', (req, res) => {
   try {
     const { type, format } = req.body;
     if (!type) return res.status(400).json({ error: 'type required (email, attachment, calendar, contact, document, drive, audit, hash, timestamp, snapshot)' });
-
-    let data;
-    switch (type) {
-      case 'email': data = getAllProjectMessages(req.params.id); break;
-      case 'attachment': data = getProjectAttachments(req.params.id); break;
-      case 'calendar': data = getCalendarEvents(req.params.id); break;
-      case 'contact': data = getContacts(req.params.id); break;
-      case 'drive': data = getDriveItems(req.params.id); break;
-      case 'audit': data = getFullAuditLog(req.params.id); break;
-      case 'timestamp': data = getRfc3161Timestamps(req.params.id); break;
-      case 'snapshot': data = getFolderSnapshots(req.params.id); break;
-      default: data = [];
-    }
-
-    const csv = MetadataExportService.exportToString(data, type, format || 'csv');
+    const csv = MetadataExportService.exportToString(metadataRows(req.params.id, type), type, format || 'csv');
     const ext = (format === 'tsv') ? 'tsv' : 'csv';
     res.setHeader('Content-Type', format === 'tsv' ? 'text/tab-separated-values' : 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${type}_export.${ext}"`);
     res.send(csv);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 router.post('/projects/:id/metadata-export/file', (req, res) => {
   try {
     const { type, format, outputPath } = req.body;
     if (!type || !outputPath) return res.status(400).json({ error: 'type and outputPath required' });
-
-    let data;
-    switch (type) {
-      case 'email': data = getAllProjectMessages(req.params.id); break;
-      case 'attachment': data = getProjectAttachments(req.params.id); break;
-      case 'calendar': data = getCalendarEvents(req.params.id); break;
-      case 'contact': data = getContacts(req.params.id); break;
-      case 'drive': data = getDriveItems(req.params.id); break;
-      case 'audit': data = getFullAuditLog(req.params.id); break;
-      case 'timestamp': data = getRfc3161Timestamps(req.params.id); break;
-      case 'snapshot': data = getFolderSnapshots(req.params.id); break;
-      default: data = [];
-    }
-
-    const result = MetadataExportService.exportToFile(data, type, outputPath, format || 'csv');
+    const result = MetadataExportService.exportToFile(metadataRows(req.params.id, type), type, outputPath, format || 'csv');
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
 });
 
 router.get('/metadata-export/columns/:type', (req, res) => {
@@ -3777,9 +4066,9 @@ router.post('/validate/email/mx', async (req, res) => {
 // ── Exchange AutoDiscover ──
 router.post('/exchange/autodiscover', async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, password } = req.body;
     if (!email) return res.status(400).json({ error: 'email required' });
-    res.json(await AutomationService.exchangeAutoDiscover(email));
+    res.json(await AutomationService.exchangeAutoDiscover(email, password));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -3802,9 +4091,10 @@ router.post('/session/output-folder', (req, res) => {
 // ── Retry Policy & Rate Limiter Status ──
 router.get('/resilience/info', (req, res) => {
   res.json({
-    retryPolicy: { description: 'Exponential backoff with jitter', maxRetries: 3, retryableErrors: ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'EAI_AGAIN'], retryableStatusCodes: [408, 429, 500, 502, 503, 504] },
-    circuitBreaker: { description: 'Trips after consecutive failures, auto-resets', states: ['closed', 'open', 'half-open'], failureThreshold: 5, resetTimeoutMs: 60000 },
-    rateLimiter: { description: 'Token-bucket rate limiting', defaultMaxRequests: 30, defaultWindowMs: 60000 },
+    profiles: COLLECTION_PROFILES,
+    retries: 'Each item: up to 4 attempts with exponential backoff, then final rounds at the end of the run (up to 50), one try per round.',
+    quota: 'A provider quota refusal pauses all workers for the provider\'s Retry-After or 60 s and halves the request rate; items fail only after 15 minutes of refusals.',
+    connections: 'Extra IMAP sessions are waited for up to 20 s; a server that refuses them does not stop the collection.',
   });
 });
 

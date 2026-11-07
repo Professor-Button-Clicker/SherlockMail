@@ -2,8 +2,10 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import { mailProxyUrl } from '../util/proxy.js';
 
 const MAX_LOG_ENTRIES = 5000;
+const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/;
 
 function compactUidSet(uids) {
   const sorted = [...uids].sort((a, b) => a - b);
@@ -14,6 +16,13 @@ function compactUidSet(uids) {
     parts.push(start === sorted[i] ? `${start}` : `${start}:${sorted[i]}`);
   }
   return parts.join(',');
+}
+
+// imapflow reports most server refusals as "Command failed"; the server's own words are in responseText.
+function withServerText(err) {
+  if (err?.authenticationFailed) return new Error(`The server refused the sign-in: ${err.responseText || err.serverResponseCode || 'wrong user name, password or token'}`);
+  if (err?.responseText && !String(err.message).includes(err.responseText)) err.message = `${err.message}: ${err.responseText}`;
+  return err;
 }
 
 export class ImapHandler {
@@ -33,15 +42,20 @@ export class ImapHandler {
   }
 
   async connect() {
-    const { host, port, username, password, tls, email } = this.config;
+    const { host, port, username, password, tls, email, accessToken, starttls } = this.config;
 
     const effectivePort = port || (tls !== false ? 993 : 143);
 
     this.client = new ImapFlow({
       host,
       port: effectivePort,
-      secure: tls !== false,
-      auth: { user: username || email, pass: password },
+      // With STARTTLS the connection starts in the clear and imapflow upgrades it when the server offers it.
+      secure: tls !== false && !starttls,
+      // A bridge on this computer (Proton Mail Bridge) has a self-signed certificate; everything else must verify.
+      ...(LOCAL_HOST.test(host) ? { tls: { rejectUnauthorized: false } } : {}),
+      // An access token signs in with XOAUTH2 instead of LOGIN.
+      auth: accessToken ? { user: username || email, accessToken } : { user: username || email, pass: password },
+      proxy: mailProxyUrl(),
       socketTimeout: 210000,
       greetingTimeout: 195000,
       logger: {
@@ -61,7 +75,7 @@ export class ImapHandler {
       await client.connect();
     } catch (err) {
       client.close();
-      throw err;
+      throw withServerText(err);
     }
     this.log('CLIENT', `Connected to ${host}:${effectivePort}`);
     return { success: true, host, port: effectivePort };
@@ -81,6 +95,9 @@ export class ImapHandler {
     const mb = this.client.mailbox;
     if (!mb || mb.path !== folderPath || !mb.readOnly) {
       await this.client.mailboxOpen(folderPath, { readOnly: true });
+      this.log('C→S', `EXAMINE ${folderPath}`);
+      // Never go on with a mailbox the server opened for writing: a failed collection beats an altered source.
+      if (!this.client.mailbox?.readOnly) throw new Error(`The server did not open ${folderPath} read-only`);
     }
     return this.client.mailbox;
   }
@@ -105,7 +122,7 @@ export class ImapHandler {
         this.log('CLIENT', `Skipped ${folderPath}: container folder that cannot hold messages`);
         return { key: folderPath, refs: [] };
       }
-      throw err;
+      throw withServerText(err);
     }
     let uids = box.exists > 0 ? await this.client.search(searchCriteria || { all: true }, { uid: true }) : [];
     uids = (uids || []).sort((a, b) => a - b);
@@ -197,7 +214,7 @@ export class ImapHandler {
   }
 
   async listMessageUids(folderPath, { limit, searchCriteria } = {}) {
-    const lock = await this.client.getMailboxLock(folderPath);
+    const lock = await this.client.getMailboxLock(folderPath, { readOnly: true });
     try {
       const query = searchCriteria || { all: true };
       const uids = [];
@@ -213,7 +230,7 @@ export class ImapHandler {
   }
 
   async fetchSingleMessage(folderPath, uid) {
-    const lock = await this.client.getMailboxLock(folderPath);
+    const lock = await this.client.getMailboxLock(folderPath, { readOnly: true });
     try {
       const downloadWithTimeout = (timeoutMs = 240000) => new Promise(async (resolve, reject) => {
         const timer = setTimeout(() => reject(new Error(`Download timeout for UID ${uid} after ${timeoutMs / 1000}s`)), timeoutMs);
@@ -247,7 +264,7 @@ export class ImapHandler {
         toAddresses: parsed.to?.value?.map(a => a.address) || [],
         ccAddresses: parsed.cc?.value?.map(a => a.address) || [],
         bccAddresses: parsed.bcc?.value?.map(a => a.address) || [],
-        date: parsed.date?.toISOString() || new Date().toISOString(),
+        date: parsed.date?.toISOString() || null,
         messageId: parsed.messageId || null,
         inReplyTo: parsed.inReplyTo || null,
         size: rawBuffer.length,
@@ -295,7 +312,7 @@ export class ImapHandler {
   }
 
   async serverSearch(folderPath, criteria) {
-    const lock = await this.client.getMailboxLock(folderPath);
+    const lock = await this.client.getMailboxLock(folderPath, { readOnly: true });
     try {
       const searchQuery = {};
 
@@ -314,7 +331,7 @@ export class ImapHandler {
         { from: criteria.keyword }
       ];
 
-      const results = await this.client.search(searchQuery);
+      const results = (await this.client.search(searchQuery, { uid: true })) || [];
       this.log('CLIENT', `Server-side search returned ${results.length} results in ${folderPath}`);
       return { count: results.length, uids: results };
     } finally {

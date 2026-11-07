@@ -16,7 +16,8 @@ export class FolderSnapshotService {
     const totalFolders = folderData.length;
     const totalMessages = folderData.reduce((sum, f) => sum + f.totalMessages, 0);
 
-    const canonical = JSON.stringify(folderData, Object.keys(folderData[0] || {}).sort());
+    // The hash covers path, counts and flags in a stable order, so two identical states hash the same.
+    const canonical = JSON.stringify([...folderData].sort((a, b) => String(a.path).localeCompare(String(b.path))).map(f => [f.path, f.totalMessages, f.unseenMessages, f.flags]));
     const hashSha256 = crypto.createHash('sha256').update(canonical).digest('hex');
 
     return {
@@ -32,10 +33,9 @@ export class FolderSnapshotService {
   }
 
   static compareSnapshots(preSnapshot, postSnapshot) {
-    const preFolders = typeof preSnapshot.folder_data === 'string'
-      ? JSON.parse(preSnapshot.folder_data) : preSnapshot.folderData || preSnapshot.folder_data;
-    const postFolders = typeof postSnapshot.folder_data === 'string'
-      ? JSON.parse(postSnapshot.folder_data) : postSnapshot.folderData || postSnapshot.folder_data;
+    const foldersOf = s => (typeof s.folder_data === 'string' ? JSON.parse(s.folder_data) : s.folderData || s.folder_data);
+    const preFolders = foldersOf(preSnapshot);
+    const postFolders = foldersOf(postSnapshot);
 
     const preMap = new Map(preFolders.map(f => [f.path, f]));
     const postMap = new Map(postFolders.map(f => [f.path, f]));
@@ -50,8 +50,8 @@ export class FolderSnapshotService {
         added.push({ path, folder });
       } else {
         const pre = preMap.get(path);
-        if (pre.totalMessages !== folder.totalMessages) {
-          changed.push({ path, before: pre.totalMessages, after: folder.totalMessages, delta: folder.totalMessages - pre.totalMessages });
+        if (pre.totalMessages !== folder.totalMessages || pre.unseenMessages !== folder.unseenMessages) {
+          changed.push({ path, before: pre.totalMessages, after: folder.totalMessages, delta: folder.totalMessages - pre.totalMessages, unseenBefore: pre.unseenMessages, unseenAfter: folder.unseenMessages });
         } else {
           unchanged.push(path);
         }

@@ -115,19 +115,25 @@ export class ZohoHandler {
     if (criteria.keyword) searchParams.set('searchKey', criteria.keyword);
     if (criteria.from) searchParams.set('sender', criteria.from);
     if (criteria.subject) searchParams.set('subject', criteria.subject);
-    searchParams.set('limit', '50');
+    searchParams.set('limit', String(LIST_PAGE));
 
-    const url = `/accounts/${this.accountId}/messages/search?${searchParams.toString()}`;
-    this.log('C→S', `GET ${this.apiBase}/api${url}`);
+    let count = 0;
+    for (let start = 1; ;) {
+      searchParams.set('start', String(start));
+      const url = `/accounts/${this.accountId}/messages/search?${searchParams.toString()}`;
+      this.log('C→S', `GET ${this.apiBase}/api${url}`);
+      const page = (await this.zohoFetch(url)).data || [];
+      count += page.length;
+      start += page.length;
+      if (page.length < LIST_PAGE) break;
+    }
 
-    const data = await this.zohoFetch(url);
-    const results = data.data || [];
-
-    this.log('S→C', `200 OK - ${results.length} messages matched`);
+    this.log('S→C', `200 OK - ${count} messages matched`);
+    searchParams.delete('start');
 
     return {
       query: searchParams.toString(),
-      resultCount: results.length,
+      resultCount: count,
       searchId: uuidv4(),
     };
   }

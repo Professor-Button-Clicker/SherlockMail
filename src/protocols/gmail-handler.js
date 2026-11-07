@@ -93,6 +93,29 @@ export class GmailHandler {
     return folders;
   }
 
+  // Google's own search syntax, counted over every page of results.
+  async searchMessages(criteria) {
+    const parts = [];
+    if (criteria.keyword) parts.push(criteria.keyword);
+    if (criteria.from) parts.push(`from:${criteria.from}`);
+    if (criteria.to) parts.push(`to:${criteria.to}`);
+    if (criteria.subject) parts.push(`subject:(${criteria.subject})`);
+    if (criteria.hasAttachment) parts.push('has:attachment');
+    if (criteria.since) parts.push(`after:${String(criteria.since).replace(/-/g, '/')}`);
+    if (criteria.before) parts.push(`before:${String(criteria.before).replace(/-/g, '/')}`);
+    const q = parts.join(' ');
+    this.log('C→S', `GET /users/me/messages?q=${q}`);
+    let count = 0;
+    let pageToken;
+    do {
+      const res = await this.call(() => this.gmail.users.messages.list({ userId: 'me', q, includeSpamTrash: true, maxResults: 500, pageToken, fields: 'messages/id,nextPageToken' }));
+      count += (res.data.messages || []).length;
+      pageToken = res.data.nextPageToken;
+    } while (pageToken);
+    this.log('S→C', `200 OK - ${count} messages matched`);
+    return { query: q, resultCount: count, searchId: uuidv4() };
+  }
+
   async fetchMessages(labelIdOrFolder, { limit } = {}) {
     const labelId = typeof labelIdOrFolder === 'string'
       ? labelIdOrFolder

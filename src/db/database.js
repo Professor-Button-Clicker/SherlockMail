@@ -314,8 +314,35 @@ export function saveFolders(projectId, folders) {
   }
 }
 
+// The server's current folder list replaces the previous one; each collection reads it live.
+export function replaceFolders(projectId, folders) {
+  const d = getDb();
+  d.exec('BEGIN');
+  try {
+    d.prepare('DELETE FROM folders WHERE project_id = ?').run(projectId);
+    saveFolders(projectId, folders);
+    d.exec('COMMIT');
+  } catch (err) {
+    d.exec('ROLLBACK');
+    throw err;
+  }
+}
+
 export function getFolders(projectId) {
   return getDb().prepare('SELECT * FROM folders WHERE project_id = ? ORDER BY path').all(projectId);
+}
+
+// Folders the server listed, plus any folder that has collected messages (POP3 and imports list none),
+// each with how many messages were actually collected from it.
+export function getFolderSummary(projectId) {
+  const d = getDb();
+  const counts = new Map(d.prepare('SELECT folder, COUNT(*) as count FROM messages WHERE project_id = ? GROUP BY folder').all(projectId).map(r => [r.folder, r.count]));
+  const out = getFolders(projectId).map(f => ({ ...f, collected_messages: counts.get(f.path) || 0 }));
+  const known = new Set(out.map(f => f.path));
+  for (const [folder, count] of counts) {
+    if (!known.has(folder)) out.push({ id: folder, project_id: projectId, path: folder, name: String(folder).split('/').pop(), total_messages: null, unseen_messages: null, collected_messages: count });
+  }
+  return out.sort((a, b) => String(a.path).localeCompare(String(b.path)));
 }
 
 export function createAcquisition(projectId, foldersJson, opts = {}) {
@@ -401,8 +428,16 @@ export function getMessages(projectId, { folder, limit, offset, search } = {}) {
   return d.prepare(sql).all(...params);
 }
 
-export function getMessageCount(projectId) {
-  return getDb().prepare('SELECT COUNT(*) as count FROM messages WHERE project_id = ?').get(projectId)?.count || 0;
+export function getMessageCount(projectId, { folder, search } = {}) {
+  let sql = 'SELECT COUNT(*) as count FROM messages WHERE project_id = ?';
+  const params = [projectId];
+  if (folder) { sql += ' AND folder = ?'; params.push(folder); }
+  if (search) {
+    sql += ' AND (subject LIKE ? OR from_address LIKE ? OR body_text LIKE ?)';
+    const s = `%${search}%`;
+    params.push(s, s, s);
+  }
+  return getDb().prepare(sql).get(...params)?.count || 0;
 }
 
 export function saveSearchQuery(projectId, queryType, queryText, criteriaJson) {
@@ -438,6 +473,12 @@ export function getAuditLog(projectId) {
 
 export function getFullAuditLog() {
   return getDb().prepare('SELECT * FROM audit_log ORDER BY id ASC').all();
+}
+
+export function deleteSmtpSettings(projectId) {
+  const d = getDb();
+  if (projectId) d.prepare('DELETE FROM smtp_settings WHERE project_id = ?').run(projectId);
+  else d.prepare('DELETE FROM smtp_settings WHERE project_id IS NULL').run();
 }
 
 export function getMessage(id) {
@@ -733,21 +774,24 @@ export function indexMessage(projectId, messageId, fields) {
   }
 }
 
+export function clearSearchIndex(projectId) {
+  getDb().prepare('DELETE FROM search_index WHERE project_id = ?').run(projectId);
+}
+
+// Every term must appear in the message, in any of the indexed fields.
 export function searchIndex(projectId, query, fields) {
   const d = getDb();
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (!terms.length) return [];
-  let sql = 'SELECT DISTINCT message_id FROM search_index WHERE project_id = ?';
-  const params = [projectId];
-  if (fields && fields.length) {
-    sql += ` AND field IN (${fields.map(() => '?').join(',')})`;
-    params.push(...fields);
-  }
+  const fieldClause = fields && fields.length ? ` AND field IN (${fields.map(() => '?').join(',')})` : '';
+  const stmt = d.prepare(`SELECT DISTINCT message_id FROM search_index WHERE project_id = ?${fieldClause} AND content LIKE ?`);
+  let matches = null;
   for (const term of terms) {
-    sql += ' AND content LIKE ?';
-    params.push(`%${term}%`);
+    const found = new Set(stmt.all(projectId, ...(fields && fields.length ? fields : []), `%${term}%`).map(r => r.message_id));
+    matches = matches ? new Set([...matches].filter(id => found.has(id))) : found;
+    if (!matches.size) break;
   }
-  return d.prepare(sql).all(...params).map(r => r.message_id);
+  return [...matches];
 }
 
 // ── SMTP Settings ──

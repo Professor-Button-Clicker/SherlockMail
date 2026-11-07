@@ -115,18 +115,19 @@ export class JmapHandler {
         accountId: this.accountId,
         filter,
         sort: [{ property: 'receivedAt', isAscending: false }],
-        limit: 50,
+        limit: 1,
+        calculateTotal: true,
       }, '0'],
     ]);
 
     const queryResult = response.methodResponses[0][1];
-    const ids = queryResult.ids || [];
+    const total = queryResult.total ?? (queryResult.ids || []).length;
 
-    this.log('S→C', `200 OK - ${ids.length} messages matched`);
+    this.log('S→C', `200 OK - ${total} messages matched`);
 
     return {
       query: JSON.stringify(filter),
-      resultCount: ids.length,
+      resultCount: total,
       searchId: uuidv4(),
     };
   }

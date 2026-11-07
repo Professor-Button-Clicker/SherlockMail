@@ -16,6 +16,7 @@ let wizLastResult = null;
 let wizEstimate = null;
 let wizEstimateKey = '';
 let wizEstimateCtl = null;
+let wizStartTls = false;
 let activeCollectionsList = [];
 const wizUnseenResults = new Map();
 const IS_ELECTRON = /Electron/i.test(navigator.userAgent);
@@ -110,7 +111,7 @@ function switchMainTab(group) {
   if (first) first.click();
 }
 
-const CASE_TABS = ['collect', 'messages', 'forensics', 'export', 'audit', 'project-detail'];
+const CASE_TABS = ['collect', 'messages', 'forensics', 'export', 'audit', 'project-detail', 'tools'];
 
 function switchTab(tab) {
   currentTab = tab;
@@ -126,7 +127,7 @@ function switchTab(tab) {
 
   // Handle message-list-panel (always-present flex container) vs panel-view overlays
   const msgPanel = document.getElementById('view-messages');
-  const panelViews = ['new-project', 'project-detail', 'search', 'tracker', 'audit', 'collect', 'export', 'forensics', 'guide', 'projects'];
+  const panelViews = ['new-project', 'project-detail', 'search', 'tracker', 'audit', 'collect', 'export', 'forensics', 'guide', 'projects', 'tools'];
 
   if (panelViews.includes(tab)) {
     const target = document.getElementById(`view-${tab}`);
@@ -134,6 +135,8 @@ function switchTab(tab) {
   }
 
   if (tab === 'projects') loadProjectsList();
+  if (tab === 'messages' && currentProject) { loadFolders(); loadMessages(); }
+  if (tab === 'tools') switchToolsTab(document.querySelector('#tools-sub-tabs .sub-tab.active')?.dataset.subtab || 'import');
   if (tab === 'tracker') loadProjectsTracker();
   if (tab === 'audit' && currentProject) loadAuditLog();
   if (tab === 'search') document.getElementById('adv-search-input')?.focus();
@@ -147,7 +150,7 @@ function switchTab(tab) {
 
   // Expand the correct main tab group
   const tabGroups = { projects: 'projects', tracker: 'projects', audit: 'projects', 'new-project': 'projects', 'project-detail': 'projects',
-    collect: 'collection', forensics: 'collection', export: 'collection', messages: 'collection', guide: 'guide' };
+    collect: 'collection', forensics: 'collection', export: 'collection', messages: 'collection', tools: 'collection', guide: 'guide' };
   const group = tabGroups[tab];
   if (group) document.querySelectorAll('.nav-main-tab').forEach(t => t.classList.toggle('active', t.dataset.group === group));
 }
@@ -180,6 +183,14 @@ function updateCaseChrome(tab = currentTab) {
   tag.classList.toggle('visible', show);
   if (show && caseTagFor !== `${p.id}:${p.status}`) renderCaseTag();
   hideNextIfHere(tab);
+}
+
+// The custody steps come from the audit log; call this after anything that adds to it.
+async function refreshCaseTag() {
+  if (!currentProject) return;
+  currentProject = await api(`/projects/${currentProject.id}`);
+  caseTagFor = null;
+  updateCaseChrome();
 }
 
 async function renderCaseTag() {
@@ -265,6 +276,7 @@ function switchForensicsTab(subtab) {
     const el = document.getElementById(`forensics-${s}`);
     if (el) el.classList.toggle('active', s === subtab);
   });
+  if (subtab === 'timestamps') loadTimestampHistory();
 }
 
 // --- System Info ---
@@ -283,30 +295,6 @@ async function loadSystemInfo() {
 }
 
 // --- Projects ---
-async function loadProjects() {
-  try {
-    const projects = await api('/projects');
-    const container = document.getElementById('sidebar-content');
-
-    if (projects.length === 0) {
-      container.innerHTML = `
-        <div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px">
-          <p>No projects yet.</p>
-          <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="switchTab('new-project')">Create First Project</button>
-        </div>`;
-      return;
-    }
-
-    container.innerHTML = projects.map(p => `
-      <div class="project-item ${currentProject?.id === p.id ? 'active' : ''}" onclick="selectProject('${p.id}')">
-        <div class="project-name">${esc(p.name)}</div>
-        <div class="project-email">${esc(p.target_email)}</div>
-        <span class="project-status status-${displayStatus(p.status)}">${displayStatus(p.status)}</span>
-      </div>
-    `).join('');
-  } catch {}
-}
-
 async function loadProjectsTracker() {
   const container = document.getElementById('tracker-content');
   try {
@@ -377,7 +365,8 @@ async function selectProject(id) {
   currentProject = await api(`/projects/${id}`);
   caseTagFor = null;
   currentFolder = null;
-  loadProjects();
+  messagesShown = 0;
+  document.getElementById('message-viewer')?.classList.remove('visible');
   loadSystemInfo();
   showProjectDetail();
 }
@@ -426,8 +415,10 @@ async function saveProjectDetails(e) {
       }
     });
     currentProject = updated;
+    caseTagFor = null;
+    updateCaseChrome();
     toast('Project updated');
-    loadProjects();
+    loadProjectsList();
     document.getElementById('project-detail-title').textContent = updated.name;
     document.getElementById('message-list-title').textContent = updated.name;
   } catch (err) {
@@ -443,13 +434,14 @@ function openProjectReview() {
   document.getElementById('message-list-title').textContent = currentProject.name;
 }
 
-async function deleteProject(id) {
-  if (!confirm('Delete this project and all its data? This cannot be undone.')) return;
+async function deleteProject(id = currentProject?.id) {
+  if (!id) return;
+  if (!confirm('Delete this project?\n\nIts records, including its chain of custody log, are removed from SherlockMail. This cannot be undone. Collected files and exports on disk are not deleted.')) return;
   try {
     await api(`/projects/${id}`, { method: 'DELETE' });
-    if (currentProject?.id === id) currentProject = null;
+    if (currentProject?.id === id) { currentProject = null; caseTagFor = null; }
     toast('Project deleted');
-    loadProjects();
+    switchTab('projects');
     loadSystemInfo();
   } catch (err) {
     toast('Delete failed: ' + err.message);
@@ -459,68 +451,58 @@ async function deleteProject(id) {
 // --- Folders ---
 async function loadFolders() {
   if (!currentProject) return;
+  const select = document.getElementById('message-folder-filter');
+  if (!select) return;
   try {
     const folders = await api(`/projects/${currentProject.id}/folders`);
-    const container = document.getElementById('sidebar-content');
-
-    if (folders.length === 0) {
-      container.innerHTML = `
-        <div class="folder-item active" onclick="selectFolder(null)">
-          <span class="folder-icon">${icon('folder')}</span>
-          <span>All Messages</span>
-          <span class="badge">${currentProject.stats?.messages?.count || 0}</span>
-        </div>
-        <div style="padding:12px;color:var(--text-muted);font-size:12px">
-          No folders enumerated yet. Run a collection to populate folders.
-        </div>`;
-      return;
-    }
-
-    const folderIcons = {
-      'INBOX': icon('inbox'), 'Sent': icon('send'), 'Drafts': icon('draft'), 'Trash': icon('trash'),
-      'Spam': icon('alert'), 'Junk': icon('alert'), 'Archive': icon('archive')
-    };
-
-    let html = `
-      <div class="folder-item ${!currentFolder ? 'active' : ''}" onclick="selectFolder(null)">
-        <span class="folder-icon">${icon('folder')}</span>
-        <span>All Messages</span>
-        <span class="badge">${currentProject.stats?.messages?.count || 0}</span>
-      </div>`;
-
-    for (const f of folders) {
-      const folderIcon = folderIcons[f.name] || icon('folder');
-      html += `
-        <div class="folder-item ${currentFolder === f.path ? 'active' : ''}" onclick="selectFolder('${esc(f.path)}')">
-          <span class="folder-icon">${folderIcon}</span>
-          <span>${esc(f.name)}</span>
-          <span class="badge">${f.total_messages}</span>
-        </div>`;
-    }
-
-    container.innerHTML = html;
-  } catch {}
+    const withMail = folders.filter(f => f.collected_messages > 0);
+    const total = withMail.reduce((sum, f) => sum + f.collected_messages, 0);
+    select.innerHTML = `<option value="">All folders (${total.toLocaleString()})</option>` + withMail.map(f =>
+      `<option value="${esc(f.path)}"${currentFolder === f.path ? ' selected' : ''}>${esc(f.path)} (${f.collected_messages.toLocaleString()})</option>`).join('');
+    select.style.display = withMail.length > 1 ? '' : 'none';
+  } catch (err) {
+    toast('Failed to load folders: ' + err.message);
+  }
 }
 
 function selectFolder(path) {
-  currentFolder = path;
-  loadFolders();
+  currentFolder = path || null;
   loadMessages();
 }
 
 // --- Messages ---
-async function loadMessages() {
+let messagesShown = 0;
+const MESSAGE_PAGE = 200;
+
+function messageRow(m) {
+  return `
+      <div class="message-row" onclick="viewMessage('${m.id}')" data-id="${m.id}">
+        <div class="msg-flags">
+          ${m.has_attachments ? `<span class="flag-attachment" title="Has attachments">${icon('clip', 14)}</span>` : ''}
+          ${m.is_encrypted ? `<span class="flag-encrypted" title="Encrypted">${icon('lock', 14)}</span>` : ''}
+          ${m.is_signed ? '<span class="flag-signed" title="Signed">&#10003;</span>' : ''}
+        </div>
+        <div class="msg-from" title="${esc(m.from_address)}">${esc(extractName(m.from_address))}</div>
+        <div class="msg-subject" title="${esc(m.subject)}">${esc(m.subject || '(no subject)')}</div>
+        <div class="msg-date">${formatDate(m.date)}</div>
+        <div class="msg-size">${formatBytes(m.size)}</div>
+      </div>`;
+}
+
+async function loadMessages({ more = false } = {}) {
   if (!currentProject) return;
-  const params = new URLSearchParams({ limit: '200' });
+  const offset = more ? messagesShown : 0;
+  const params = new URLSearchParams({ limit: String(MESSAGE_PAGE), offset: String(offset) });
   if (currentFolder) params.set('folder', currentFolder);
+  const list = document.getElementById('message-list');
+  document.getElementById('message-list-title').textContent = currentProject.name;
   try {
-    const data = await api(`/projects/${currentProject.id}/messages?${params}`);
-    const messages = data.messages || data;
+    const { messages, total } = await api(`/projects/${currentProject.id}/messages?${params}`);
+    list.querySelector('.load-more-row')?.remove();
 
-    const list = document.getElementById('message-list');
-    document.getElementById('message-count').textContent = `${messages.length} messages`;
-
-    if (messages.length === 0) {
+    if (!more && messages.length === 0) {
+      messagesShown = 0;
+      document.getElementById('message-count').textContent = '0 messages';
       list.innerHTML = `
         <div class="empty-state">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
@@ -533,26 +515,37 @@ async function loadMessages() {
       return;
     }
 
-    list.innerHTML = messages.map(m => `
-      <div class="message-row" onclick="viewMessage('${m.id}')" data-id="${m.id}">
-        <div class="msg-flags">
-          ${m.has_attachments ? `<span class="flag-attachment" title="Has attachments">${icon('clip', 14)}</span>` : ''}
-          ${m.is_encrypted ? `<span class="flag-encrypted" title="Encrypted">${icon('lock', 14)}</span>` : ''}
-          ${m.is_signed ? '<span class="flag-signed" title="Signed">&#10003;</span>' : ''}
-        </div>
-        <div class="msg-from" title="${esc(m.from_address)}">${esc(extractName(m.from_address))}</div>
-        <div class="msg-subject" title="${esc(m.subject)}">${esc(m.subject || '(no subject)')}</div>
-        <div class="msg-date">${formatDate(m.date)}</div>
-        <div class="msg-size">${formatBytes(m.size)}</div>
-      </div>
-    `).join('');
-  } catch {}
+    const html = messages.map(messageRow).join('');
+    if (more) list.insertAdjacentHTML('beforeend', html);
+    else list.innerHTML = html;
+    messagesShown = offset + messages.length;
+    document.getElementById('message-count').textContent = messagesShown < total
+      ? `Showing ${messagesShown.toLocaleString()} of ${total.toLocaleString()} messages`
+      : `${total.toLocaleString()} messages`;
+    if (messagesShown < total) {
+      list.insertAdjacentHTML('beforeend', `<div class="load-more-row" style="padding:12px;text-align:center"><button type="button" class="btn btn-secondary btn-sm" onclick="loadMessages({ more: true })">Show ${Math.min(MESSAGE_PAGE, total - messagesShown).toLocaleString()} more</button></div>`);
+    }
+  } catch (err) {
+    toast('Failed to load messages: ' + err.message);
+  }
+}
+
+function addressListText(value) {
+  try {
+    const list = typeof value === 'string' ? JSON.parse(value) : value;
+    return Array.isArray(list) ? list.join(', ') : String(value ?? '');
+  } catch {
+    return String(value ?? '');
+  }
 }
 
 async function viewMessage(msgId) {
   try {
     const data = await api(`/projects/${currentProject.id}/messages/${msgId}`);
     const viewer = document.getElementById('message-viewer');
+    // A result opened from Search shows here, in Review; the way back is on the message.
+    const fromSearch = currentTab === 'search';
+    if (fromSearch) switchTab('messages');
 
     document.querySelectorAll('.message-row').forEach(r => r.classList.toggle('active', r.dataset.id === msgId));
 
@@ -574,22 +567,27 @@ async function viewMessage(msgId) {
 
     viewer.innerHTML = `
       <div class="msg-viewer-header">
+        ${fromSearch ? `<button type="button" class="btn btn-secondary btn-sm" style="margin-bottom:8px" onclick="switchTab('search')">Back to search results</button>` : ''}
         <div class="msg-viewer-subject">${esc(data.subject || '(no subject)')}</div>
         <div class="msg-header-row"><span class="msg-header-label">From:</span><span class="msg-header-value">${esc(data.from_address)}</span></div>
-        <div class="msg-header-row"><span class="msg-header-label">To:</span><span class="msg-header-value">${esc(data.to_addresses)}</span></div>
-        ${data.cc_addresses ? `<div class="msg-header-row"><span class="msg-header-label">Cc:</span><span class="msg-header-value">${esc(data.cc_addresses)}</span></div>` : ''}
-        <div class="msg-header-row"><span class="msg-header-label">Date:</span><span class="msg-header-value">${data.date ? new Date(data.date).toLocaleString() : 'Unknown'}</span></div>
+        <div class="msg-header-row"><span class="msg-header-label">To:</span><span class="msg-header-value">${esc(addressListText(data.to_addresses))}</span></div>
+        ${addressListText(data.cc_addresses) ? `<div class="msg-header-row"><span class="msg-header-label">Cc:</span><span class="msg-header-value">${esc(addressListText(data.cc_addresses))}</span></div>` : ''}
+        <div class="msg-header-row"><span class="msg-header-label">Date:</span><span class="msg-header-value">${data.date ? new Date(data.date).toLocaleString() : 'No date in the message'}</span></div>
         <div class="msg-header-row"><span class="msg-header-label">Message-ID:</span><span class="msg-header-value" style="font-family:var(--font-mono);font-size:12px">${esc(data.message_id)}</span></div>
       </div>
       <div class="msg-forensic-bar">
         <div class="hash-item"><span class="hash-label">MD5:</span><span class="hash-value">${data.hash_md5 || 'N/A'}</span></div>
         <div class="hash-item"><span class="hash-label">SHA-256:</span><span class="hash-value">${data.hash_sha256 || 'N/A'}</span></div>
         <button class="btn btn-sm" onclick="analyzeHeaders('${data.id}')" style="margin-left:auto;font-size:11px;padding:3px 10px;background:var(--bg-surface);border:1px solid var(--border);color:var(--accent);cursor:pointer;border-radius:4px" title="SPF/DKIM/DMARC verification, routing hops, red flags">Analyze Headers</button>
+        ${data.is_signed ? `<button class="btn btn-sm" onclick="checkMessageSignature('${data.id}')" style="font-size:11px;padding:3px 10px;background:var(--bg-surface);border:1px solid var(--border);color:var(--accent);cursor:pointer;border-radius:4px" title="Checks the S/MIME signature against the collected bytes">Check Signature</button>` : ''}
+        ${data.is_encrypted ? `<button class="btn btn-sm" onclick="decryptMessageCopy('${data.id}')" style="font-size:11px;padding:3px 10px;background:var(--bg-surface);border:1px solid var(--border);color:var(--accent);cursor:pointer;border-radius:4px" title="Decrypts a separate copy; the evidence is not changed">Decrypt a Copy</button>` : ''}
       </div>
+      <div id="msg-crypto-result" style="font-size:12px;padding:0 16px;line-height:1.7"></div>
       ${attachmentsHtml}
       <div class="msg-viewer-body">
         <p style="color:var(--text-muted);font-size:12px">EML preserved at: <code>${esc(data.eml_path || 'Not available')}</code></p>
         <p style="color:var(--text-muted);font-size:12px;margin-top:4px">Folder: <code>${esc(data.folder)}</code> | UID: ${data.uid} | Flags: ${esc(data.flags)}</p>
+        <pre style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:13px;margin-top:12px">${esc(data.body_text || (data.is_encrypted ? '(The body is encrypted.)' : '(No text body.)'))}</pre>
       </div>
     `;
     viewer.classList.add('visible');
@@ -659,12 +657,16 @@ async function globalSearch() {
   switchTab('search');
   document.getElementById('adv-search-input').value = query;
 
-  if (type === 'inline') {
-    const results = await api(`/projects/${currentProject.id}/inline-search`, { method: 'POST', body: { query } });
-    renderInlineSearchResults(results, query);
-  } else {
-    const results = await api(`/projects/${currentProject.id}/search`, { method: 'POST', body: { criteria: { keyword: query }, queryType: 'keyword' } });
-    renderServerSearchResults(results, query);
+  try {
+    if (type === 'inline') {
+      const results = await api(`/projects/${currentProject.id}/inline-search`, { method: 'POST', body: { query } });
+      renderInlineSearchResults(results, query);
+    } else {
+      const results = await api(`/projects/${currentProject.id}/search`, { method: 'POST', body: { criteria: { keyword: query }, queryType: 'keyword' } });
+      renderServerSearchResults(results, query);
+    }
+  } catch (err) {
+    toast('Search failed: ' + err.message);
   }
 }
 
@@ -696,7 +698,9 @@ function buildAdvancedQuery() {
   if (hasAttachments) parts.push('attachmentcount:[1 TO 9999]');
 
   const minSize = parseInt(document.getElementById('adv-min-size').value);
-  if (minSize > 0) parts.push(`size:[${minSize * 1024} TO 999999999]`);
+  if (minSize > 0) parts.push(`size:>${minSize * 1024 - 1}`);
+
+  if (document.getElementById('adv-encrypted').checked) parts.push('(is:encrypted OR is:signed)');
 
   return parts.join(' ');
 }
@@ -732,11 +736,6 @@ async function runAdvancedSearch() {
 
   try {
     const results = await api(`/projects/${currentProject.id}/inline-search`, { method: 'POST', body: { query } });
-    const encrypted = document.getElementById('adv-encrypted').checked;
-    if (encrypted && results.results) {
-      results.results = results.results.filter(m => m.is_encrypted || m.is_signed);
-      results.stats.matched = results.results.length;
-    }
     renderInlineSearchResults(results, query);
   } catch (err) {
     toast('Search failed: ' + err.message);
@@ -835,7 +834,8 @@ async function verifyChain() {
     if (chain?.chainVerified?.valid) {
       el.innerHTML = `<span class="verify-pass">Chain integrity verified (${chain.totalEntries} entries)</span>`;
     } else {
-      el.innerHTML = `<span class="verify-fail">Chain integrity issue detected</span>`;
+      const first = chain?.chainVerified?.breaks?.[0];
+      el.innerHTML = `<span class="verify-fail">Chain broken at ${chain?.chainVerified?.breaks?.length || '?'} entries${first ? `: ${esc(first.event || '')} ${esc(first.timestamp || '')}. ${esc(first.problem || '')}` : ''}</span>`;
     }
   } catch (err) {
     document.getElementById('chain-status').innerHTML = `<span class="verify-fail">Verification failed</span>`;
@@ -874,10 +874,13 @@ async function runExport() {
 
   try {
     const result = await api(`/projects/${currentProject.id}/export`, { method: 'POST', body });
-    statusEl.innerHTML = '<span class="verify-pass">Export complete</span>';
+    statusEl.innerHTML = result.failedCount || result.verificationFailures?.length
+      ? '<span class="verify-fail">Export finished with problems</span>'
+      : '<span class="verify-pass">Export complete</span>';
     renderExportResult(result);
     loadExportHistory();
     loadSystemInfo();
+    refreshCaseTag();
   } catch (err) {
     statusEl.innerHTML = `<span class="verify-fail">Export failed: ${esc(err.message)}</span>`;
   }
@@ -940,14 +943,25 @@ function renderExportResult(result) {
         </div>
       `).join('')}
     ` : ''}
-    ${result.timestamp ? `
-      <div style="margin-top:16px;padding:12px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius)">
-        <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">RFC 3161 Timestamp</div>
-        <div style="font-family:var(--font-mono);font-size:12px;color:var(--accent)">${result.timestamp.genTime}</div>
-        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Serial: ${result.timestamp.serialNumber}</div>
-      </div>
-    ` : ''}
+    ${result.failedCount || result.verificationFailures?.length ? `
+      <div class="verify-fail" style="margin-top:12px">${result.failedCount || 0} message(s) were not exported (export_failed_items.csv); ${result.verificationFailures?.length || 0} file(s) failed read-back verification.</div>` : ''}
+    <div class="form-hint" style="margin-top:12px">Saved to <code>${esc(result.outputDir || '')}</code></div>
+    ${timestampBlock(result.timestamp)}
   `;
+}
+
+// One block for a trusted timestamp, whether it was issued or could not be.
+function timestampBlock(ts) {
+  if (!ts) return '';
+  const ok = ts.status === 'verified';
+  return `
+    <div style="margin-top:16px;padding:12px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius)">
+      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Trusted timestamp (RFC 3161)</div>
+      ${ok ? `
+        <div style="font-family:var(--font-mono);font-size:12px;color:var(--accent)">${esc(ts.genTime)}, from ${esc(ts.tsaName || ts.tsaUrl || '')}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px">Serial ${esc(ts.serialNumber || '')}. Signature, hash and nonce verified.${ts.chainTrusted ? '' : ' The issuer does not chain to a root this computer trusts.'}</div>`
+      : `<div class="verify-fail" style="font-size:12px">No trusted timestamp: ${esc(ts.error || 'no authority could be reached')}. The evidence is unaffected; you can request one later in Quality check, RFC 3161 Timestamps.</div>`}
+    </div>`;
 }
 
 async function loadExportHistory() {
@@ -1020,7 +1034,7 @@ async function runCombinedQC() {
     totalPass += s.passed || 0;
     totalWarn += s.warnings || 0;
     totalFail += s.failed || 0;
-    sections.push({ title: `Quality control (11 checks${qcBody ? ', latest collection' : ''})`, status: qc.overallStatus, checks: qc.checks || [] });
+    sections.push({ title: `Quality control (${(qc.checks || []).length} checks${qcBody ? ', latest collection' : ''})`, status: qc.overallStatus, checks: qc.checks || [] });
   } catch (e) {
     sections.push({ title: 'Quality Control', status: 'fail', checks: [{ name: 'Quality Control', status: 'fail', detail: e.message }] });
     totalFail++;
@@ -1046,9 +1060,9 @@ async function runCombinedQC() {
     const hv = integrity.hashVerification || {};
     const chain = integrity.auditLogIntegrity || {};
     const chainValid = chain.chainVerified?.valid;
-    const hashOk = hv.preserved === hv.total;
+    const hashBad = (hv.modified || 0) + (hv.missing || 0);
     const checks = [];
-    checks.push({ name: `Hash Integrity (${hv.algorithm || 'SHA-256'})`, status: hashOk ? 'pass' : 'warning', detail: `${hv.preserved}/${hv.total} hashes preserved` });
+    checks.push({ name: `Hash Integrity (${hv.algorithm || 'SHA-256'})`, status: hashBad ? 'fail' : hv.verified === hv.total ? 'pass' : 'warning', detail: `${hv.verified} of ${hv.total} files re-hashed and matched; ${hv.modified || 0} changed, ${hv.missing || 0} missing, ${(hv.noFile || 0) + (hv.noHash || 0)} without a file or hash` });
     checks.push({ name: 'Audit Chain Integrity', status: chainValid ? 'pass' : 'fail', detail: `${chain.totalEntries || 0} entries verified` });
     if (integrity.exportIntegrity?.length) {
       for (const exp of integrity.exportIntegrity) {
@@ -1124,6 +1138,8 @@ async function runCombinedQC() {
           </div>
           <div class="qc-detail">${{ pass: 'Passed', warning: 'Warning', fail: 'Failed' }[check.status] || check.status}</div>
         </div>`;
+      const flagged = check.mismatches || check.unverifiable;
+      if (flagged?.length) html += renderQCFlaggedMessages(flagged);
     }
     html += '</div>';
   }
@@ -1139,6 +1155,7 @@ async function runCombinedQC() {
 
   resultsEl.innerHTML = html;
   statusEl.innerHTML = `<span style="color:${statusColor}">${statusText}</span>`;
+  refreshCaseTag();
 }
 
 // ============================================================
@@ -1194,10 +1211,10 @@ function renderQCFlaggedMessages(rows) {
         </tr>
         ${rows.map(r => `
           <tr style="border-top:1px solid var(--border)">
-            <td style="padding:4px">${esc(r.folder || '')} #${esc(String(r.uid ?? ''))} ${esc(r.subject || '')}</td>
+            <td style="padding:4px">${esc(r.folder || '')}${r.uid != null ? ` #${esc(String(r.uid))}` : ''} ${esc(r.subject || '')}</td>
             <td style="padding:4px;font-family:var(--font-mono)">${fmt(r.emailDateHeader)}</td>
             <td style="padding:4px;font-family:var(--font-mono)">${fmt(r.recordedValue || r.recordedHeaderDate || r.recordedDate)}</td>
-            <td style="padding:4px;color:var(--danger)">${esc(r.problem || '')}</td>
+            <td style="padding:4px;color:var(--danger)">${esc(r.problem || (r.recorded ? `Recorded SHA-256 ${r.recorded}, now ${r.actual}` : ''))}</td>
           </tr>`).join('')}
       </table>
     </details>`;
@@ -1265,12 +1282,15 @@ function renderCloudResults(result) {
 async function createTimestamp(type) {
   if (!currentProject) { toast('Select a project first'); return; }
   const statusEl = document.getElementById('ts-status');
-  statusEl.innerHTML = '<span style="color:var(--accent)">Creating timestamp...</span>';
+  statusEl.innerHTML = '<span style="color:var(--accent)">Asking the timestamp authority...</span>';
 
   try {
     const result = await api(`/projects/${currentProject.id}/timestamp`, { method: 'POST', body: { type } });
-    statusEl.innerHTML = '<span class="verify-pass">Timestamp created</span>';
+    statusEl.innerHTML = result.status === 'verified'
+      ? '<span class="verify-pass">Timestamp issued and verified</span>'
+      : '<span class="verify-fail">No timestamp was issued</span>';
     renderTimestampResult(result);
+    loadTimestampHistory();
   } catch (err) {
     statusEl.innerHTML = `<span class="verify-fail">Failed: ${esc(err.message)}</span>`;
   }
@@ -1278,21 +1298,13 @@ async function createTimestamp(type) {
 
 function renderTimestampResult(result) {
   const el = document.getElementById('ts-results');
-  const ts = result.timestamp || {};
-
   el.innerHTML = `
-    <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label">Type</div><div class="stat-value" style="font-size:18px">${esc(result.type || '')}</div></div>
-      <div class="stat-card"><div class="stat-label">Time</div><div class="stat-value" style="font-size:14px;font-family:var(--font-mono)">${esc(ts.genTime || '')}</div></div>
-      <div class="stat-card"><div class="stat-label">Serial Number</div><div class="stat-value" style="font-size:12px;font-family:var(--font-mono)">${esc(ts.serialNumber || '')}</div></div>
-    </div>
-    <div style="margin-top:16px;padding:16px;background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--radius)">
-      <div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">Timestamp Details</div>
-      <div style="font-size:12px;color:var(--text-secondary);line-height:1.8">
-        <div>Hash Algorithm: <strong style="color:var(--accent)">${esc(ts.hashAlgorithm || 'SHA-256')}</strong></div>
-        <div>Message Digest: <span style="font-family:var(--font-mono);color:var(--accent);font-size:11px">${esc(result.collectionDigest || result.manifestHash || '')}</span></div>
-        <div>Standard: <strong>RFC 3161</strong></div>
-      </div>
+    ${timestampBlock(result)}
+    <div style="margin-top:12px;font-size:12px;color:var(--text-secondary);line-height:1.8">
+      <div>File covered: <code>${esc(result.targetFile || '')}</code></div>
+      <div>SHA-256 sent to the authority: <code>${esc(result.targetHash || '')}</code></div>
+      ${result.tokenFile ? `<div>Token: <code>${esc(result.tokenFile)}</code></div><div>Anyone can check it: <code>openssl ts -verify -data "${esc(result.targetFile)}" -in "${esc(result.tokenFile)}" -token_in -CAfile &lt;authority's root certificate&gt;</code></div>` : ''}
+      ${(result.attempts || []).filter(a => a.status !== 'verified').map(a => `<div>${esc(a.tsa)}: ${esc(a.error || a.status)}</div>`).join('')}
     </div>`;
 }
 
@@ -1309,6 +1321,7 @@ async function verifyIntegrity() {
     const result = await api(`/projects/${currentProject.id}/verify`);
     statusEl.innerHTML = '<span class="verify-pass">Verification complete</span>';
     renderIntegrityResults(result);
+    refreshCaseTag();
   } catch (err) {
     statusEl.innerHTML = `<span class="verify-fail">Verification failed: ${esc(err.message)}</span>`;
   }
@@ -1322,23 +1335,25 @@ function renderIntegrityResults(result) {
 
   let html = `
     <div class="stats-grid">
-      <div class="stat-card"><div class="stat-label">Messages Verified</div><div class="stat-value">${hv.total || 0}</div></div>
-      <div class="stat-card"><div class="stat-label">Hashes Preserved</div><div class="stat-value" style="color:var(--success)">${hv.preserved || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Messages</div><div class="stat-value">${hv.total || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Files Matched</div><div class="stat-value" style="color:${hv.verified === hv.total ? 'var(--success)' : 'var(--danger)'}">${hv.verified || 0}</div></div>
       <div class="stat-card"><div class="stat-label">Audit Entries</div><div class="stat-value">${chain.totalEntries || 0}</div></div>
       <div class="stat-card"><div class="stat-label">Chain Valid</div><div class="stat-value" style="color:${chainValid ? 'var(--success)' : 'var(--danger)'}">${chainValid ? 'YES' : 'NO'}</div></div>
-      <div class="stat-card"><div class="stat-label">Exports Verified</div><div class="stat-value">${result.exportIntegrity?.length || 0}</div></div>
-      <div class="stat-card"><div class="stat-label">RFC 3161 Timestamps</div><div class="stat-value">${result.timestampRecords || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Exports Verified</div><div class="stat-value">${(result.exportIntegrity || []).filter(e => e.valid).length} of ${result.exportIntegrity?.length || 0}</div></div>
+      <div class="stat-card"><div class="stat-label">Trusted Timestamps</div><div class="stat-value">${result.timestampRecords || 0}</div></div>
     </div>
 
     <h3 style="margin:16px 0 12px;font-size:14px">Verification Checks</h3>
-    <div class="qc-check ${hv.preserved === hv.total ? 'qc-pass' : 'qc-warning'}">
-      <div class="qc-icon">${hv.preserved === hv.total ? '&#10003;' : '!'}</div>
+    <div class="qc-check ${hv.modified || hv.missing ? 'qc-fail' : hv.verified === hv.total ? 'qc-pass' : 'qc-warning'}">
+      <div class="qc-icon">${hv.modified || hv.missing ? '&#10007;' : hv.verified === hv.total ? '&#10003;' : '!'}</div>
       <div>
         <div class="qc-name">Message Hash Integrity (${hv.algorithm || 'SHA-256'})</div>
-        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${hv.preserved}/${hv.total} hashes preserved</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${hv.verified} of ${hv.total} files re-hashed and matched; ${hv.modified || 0} changed, ${hv.missing || 0} missing, ${(hv.noFile || 0) + (hv.noHash || 0)} without a file or hash</div>
       </div>
-      <div class="qc-detail">${hv.preserved === hv.total ? 'PASS' : 'WARNING'}</div>
+      <div class="qc-detail">${hv.modified || hv.missing ? 'FAIL' : hv.verified === hv.total ? 'PASS' : 'WARNING'}</div>
     </div>
+    ${(hv.details || []).filter(d => !['verified', 'no_file', 'no_hash'].includes(d.status)).slice(0, 50).map(d => `
+      <div class="form-hint" style="margin:0 0 4px 40px;color:var(--danger)">${esc(d.status)}: ${esc(d.subject)} (${esc(d.file || '')})</div>`).join('')}
 
     <div class="qc-check ${chainValid ? 'qc-pass' : 'qc-fail'}">
       <div class="qc-icon">${chainValid ? '&#10003;' : '&#10007;'}</div>
@@ -1357,7 +1372,7 @@ function renderIntegrityResults(result) {
           <div class="qc-icon">${valid ? '&#10003;' : '&#10007;'}</div>
           <div>
             <div class="qc-name">Export: ${esc(exp.format?.toUpperCase() || 'Unknown')}</div>
-            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${exp.error ? esc(exp.error) : 'Files verified'}</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${exp.error ? esc(exp.error) : `${exp.verified} of ${exp.totalFiles} files match the manifest${exp.failed ? `; ${(exp.details || []).filter(d => d.status !== 'verified').slice(0, 5).map(d => `${esc(d.filename)}: ${esc(d.status)}`).join(', ')}` : ''}`}</div>
           </div>
           <div class="qc-detail">${valid ? 'PASS' : 'FAIL'}</div>
         </div>`;
@@ -2182,6 +2197,7 @@ function wizProfileChanged() {
   }
   infoEl.style.display = '';
 
+  wizStartTls = !!profile.preset?.starttls;
   if (profile.preset) {
     if (profile.preset.host) document.getElementById('wiz-host').value = profile.preset.host;
     if (profile.preset.port) document.getElementById('wiz-port').value = profile.preset.port;
@@ -2366,14 +2382,25 @@ function wizSaveConnection() {
     wizConnection.port = parseInt(document.getElementById('wiz-port').value) || 993;
     wizConnection.username = document.getElementById('wiz-username')?.value || wizConnection.email;
     wizConnection.tls = document.getElementById('wiz-tls')?.checked !== false;
-    wizConnection.password = password;
+    if (wizStartTls) wizConnection.starttls = true;
+    wizConnection.authMethod = authMethod;
+    // OAuth 2.0 here is a token the examiner pastes, sent with XOAUTH2 (IMAP only); Yahoo uses its saved sign-in.
+    if (authMethod === 'oauth2') wizConnection.accessToken = password;
+    else if (authMethod !== 'yahoo_oauth') wizConnection.password = password;
   }
 
   if (protocol === 'ews') {
     const ewsUrl = document.getElementById('wiz-ews-url')?.value;
     if (ewsUrl) wizConnection.ewsUrl = ewsUrl;
     wizConnection.authType = authMethod;
-    if (authMethod === 'password' && password) wizConnection.password = password;
+    if (authMethod === 'oauth2' && password) wizConnection.accessToken = password;
+    else if (authMethod !== 'oauth2' && password) wizConnection.password = password;
+  }
+
+  // An enterprise (app-only) or imported Microsoft sign-in from Tools applies to the mailbox named here.
+  if ((protocol === 'graph' || protocol === 'ews') && typeof toolsEnterprise !== 'undefined' && toolsEnterprise) {
+    wizConnection.enterpriseSessionId = toolsEnterprise.sessionId;
+    wizConnection.targetUser = wizConnection.email;
   }
 }
 
@@ -2382,6 +2409,7 @@ function wizUpdateAuthLabel() {
   const label = document.getElementById('wiz-pass-label');
   if (method === 'app-password') label.textContent = 'App-Specific Password';
   else if (method === 'oauth2') label.textContent = 'Access Token';
+  else if (method === 'yahoo_oauth') label.textContent = 'Not needed: uses the Yahoo sign-in from Tools';
   else label.textContent = 'Password';
 }
 
@@ -2430,27 +2458,33 @@ function buildFallbackHint() {
 }
 
 async function wizDetectProvider() {
-  const email = document.getElementById('wiz-email').value;
+  const email = document.getElementById('wiz-email').value.trim();
   if (!email) { toast('Enter an email address first'); return; }
 
   const el = document.getElementById('wiz-conn-status');
   el.innerHTML = '<span style="color:var(--accent)">Detecting provider...</span>';
 
   try {
-    const result = await api('/detect-provider', { method: 'POST', body: { email } });
-    if (result.profile?.imap) {
-      document.getElementById('wiz-host').value = result.profile.imap.host || '';
-      document.getElementById('wiz-port').value = result.profile.imap.port || 993;
-      if (result.profile.requiresAppPassword) {
-        document.getElementById('wiz-auth-method').value = 'app-password';
-        wizUpdateAuthLabel();
-      }
-      el.innerHTML = `<span class="verify-pass">Detected: ${esc(result.profile.name)}</span>`;
-    } else {
-      el.innerHTML = '<span style="color:var(--warning)">Could not auto-detect provider</span>';
+    const known = await api(`/providers/detect?email=${encodeURIComponent(email)}`);
+    if (known.providerId && known.providerId !== 'other' && known.provider) {
+      document.getElementById('wiz-provider').value = known.providerId;
+      await wizProviderChanged();
+      el.innerHTML = `<span class="verify-pass">Detected: ${esc(known.provider.name)}</span>`;
+      return;
     }
-  } catch {
-    el.innerHTML = '<span class="verify-fail">Detection failed</span>';
+    // Not a known address: ask DNS who handles this domain's mail.
+    const profile = await api('/server-profiles/detect', { method: 'POST', body: { email } });
+    if (profile.imapHost) {
+      document.getElementById('wiz-host').value = profile.imapHost;
+      document.getElementById('wiz-port').value = profile.imapPort || 993;
+      el.innerHTML = profile.providerName
+        ? `<span class="verify-pass">Mail for this domain goes to ${esc(profile.providerName)}</span>`
+        : `<span style="color:var(--warning)">No known provider. ${esc(profile.imapHost)} is only a guess from the domain name: test the connection.</span>`;
+    } else {
+      el.innerHTML = '<span style="color:var(--warning)">This domain has no mail servers in DNS. Enter the server details yourself.</span>';
+    }
+  } catch (err) {
+    el.innerHTML = `<span class="verify-fail">Detection failed: ${esc(err.message)}</span>`;
   }
 }
 
@@ -3136,18 +3170,21 @@ function wizShowResults(result) {
         ${result.logsDir ? `<div><span style="color:var(--text-muted)">Logs:</span> <code>${esc(result.logsDir)}</code></div>` : ''}
         ${result.logFiles?.length ? `<div style="font-size:11px;color:var(--text-secondary);margin-top:4px">${result.logFiles.map(esc).join(', ')}</div>` : ''}
       </div>` : ''}
-    ${result.timestamp ? `
+    ${result.folderSnapshot ? `
       <div class="wiz-result-block">
-        <div class="wiz-result-title">Collection Timestamp</div>
-        <div style="font-family:var(--font-mono);font-size:12px;color:var(--accent)">${esc(result.timestamp)}</div>
+        <div class="wiz-result-title">Mailbox Before and After</div>
+        ${result.folderSnapshot.changed
+          ? `<div style="color:var(--warning)">The mailbox changed during the collection (${result.folderSnapshot.messageDelta >= 0 ? '+' : ''}${result.folderSnapshot.messageDelta} messages): ${result.folderSnapshot.foldersChanged.map(f => `${esc(f.path)} ${f.before} to ${f.after}`).join(', ')}. Run a differential collection to pick up new mail.</div>`
+          : '<div>Folder counts were the same before and after the collection.</div>'}
       </div>` : ''}
+    ${timestampBlock(result.timestamp)}
   `;
 
   const transferSrc = document.getElementById('wiz-transfer-source');
   if (transferSrc) transferSrc.value = result.destinationDir || result.sessionDir || '';
 
   const errEl = document.getElementById('wiz-results-errors');
-  const statusColor = result.error || result.canceled ? 'var(--danger)' : result.failedCount > 0 ? 'var(--warning)' : 'var(--success)';
+  const statusColor = result.error || result.canceled || result.status === 'failed' ? 'var(--danger)' : result.failedCount > 0 || result.status === 'completed_with_errors' ? 'var(--warning)' : 'var(--success)';
   errEl.innerHTML = `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
     <p style="color:${statusColor};font-weight:600;margin:0">${esc(completionLabel)}</p>
     ${result.sessionDir ? `<button class="btn btn-secondary" onclick="wizOpenOutputFolder()" style="white-space:nowrap;padding:6px 14px;font-size:13px">

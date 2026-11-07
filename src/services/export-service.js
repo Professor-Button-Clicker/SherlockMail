@@ -67,17 +67,17 @@ export class ExportService {
         name: 'PDF Report',
         extension: '.pdf',
         mimeType: 'application/pdf',
-        description: 'PDF report with full message metadata, headers, body text, and forensic hashes for court-ready documentation.',
+        description: 'PDF report with message metadata, routing headers, the full body text, attachment names and hashes. PDF\'s standard fonts cover Western European text; any other character prints as "?" and the report says how many were replaced. Keep the EML export as the original evidence.',
         forensicValue: 'MEDIUM',
         preserves: ['Message metadata', 'Body text', 'Hash values', 'Chain of custody reference'],
-        limitations: ['Attachments listed but not embedded', 'Body text only (no HTML rendering)'],
+        limitations: ['Attachments listed but not embedded', 'Body text only (no HTML rendering)', 'Characters outside Western European text print as "?" (counted in the report)'],
         usedBy: ['Court submissions', 'Case documentation', 'Client reports'],
       },
       concordance: {
         name: 'Concordance DAT (Load File)',
         extension: '.dat',
         mimeType: 'text/plain',
-        description: 'Concordance-compatible delimited load file for eDiscovery review platforms. Uses standard þ (thorn) delimiter and ð (eth) text qualifier. Includes OPT cross-reference file.',
+        description: 'Concordance load file for eDiscovery review platforms, with the standard delimiters: DC4 (ASCII 20) between fields, thorn (ASCII 254) around values and the registered sign (ASCII 174) for line breaks inside a value. Includes an OPT cross-reference file.',
         forensicValue: 'HIGH',
         preserves: ['All metadata fields', 'Hash values', 'Folder paths', 'Date/time stamps'],
         limitations: ['Body text truncated to 32KB per field', 'Attachments referenced but not inline'],
@@ -237,10 +237,12 @@ export class ExportService {
         }
         for (const group of groups) {
           try {
-            const result = this.generatePdf(group.messages, projectId, group.label);
-            const filePath = path.join(outputDir, result.filename);
-            fs.writeFileSync(filePath, result.content);
-            files.push({ ...result, path: filePath, relativePath: result.filename });
+            const result = this.generatePdf(group.messages, projectId, group.label, options.attachmentsByMessage);
+            // Thread and message subjects repeat; a later PDF must never overwrite an earlier one.
+            const filePath = uniquePath(outputDir, result.filename);
+            const { content, ...fileInfo } = result;
+            fs.writeFileSync(filePath, content);
+            files.push({ ...fileInfo, filename: path.basename(filePath), path: filePath, relativePath: path.basename(filePath) });
           } catch (err) { for (const m of group.messages) fail(m, err); }
         }
         break;
@@ -250,12 +252,14 @@ export class ExportService {
         const datResult = this.generateConcordanceDat(messages);
         const datPath = path.join(outputDir, datResult.filename);
         fs.writeFileSync(datPath, datResult.content, 'utf8');
-        files.push({ ...datResult, path: datPath, relativePath: datResult.filename });
+        const { content: _dat, ...datInfo } = datResult;
+        files.push({ ...datInfo, path: datPath, relativePath: datResult.filename });
 
         const optResult = this.generateConcordanceOpt(messages, projectId);
         const optPath = path.join(outputDir, optResult.filename);
         fs.writeFileSync(optPath, optResult.content, 'utf8');
-        files.push({ ...optResult, path: optPath, relativePath: optResult.filename });
+        const { content: _opt, ...optInfo } = optResult;
+        files.push({ ...optInfo, path: optPath, relativePath: optResult.filename });
         break;
       }
 
@@ -263,7 +267,8 @@ export class ExportService {
         const xmlResult = this.generateXml(messages, projectId);
         const xmlPath = path.join(outputDir, xmlResult.filename);
         fs.writeFileSync(xmlPath, xmlResult.content, 'utf8');
-        files.push({ ...xmlResult, path: xmlPath, relativePath: xmlResult.filename });
+        const { content: _xml, ...xmlInfo } = xmlResult;
+        files.push({ ...xmlInfo, path: xmlPath, relativePath: xmlResult.filename });
         break;
       }
     }
@@ -274,20 +279,19 @@ export class ExportService {
       addTextFile('export_failed_items.csv', rows.join('\r\n') + '\r\n');
     }
 
-    // Every exported file is read back from disk and hashed: what the manifest lists is what was written.
+    const metadataCsv = this.generateMetadataCsv(messages);
+    addTextFile('metadata.csv', metadataCsv.content);
+
+    const sessionManifest = this.generateSessionManifest(projectId, exportId, format, messages, files, options);
+    addTextFile('session_manifest.xml', sessionManifest.content);
+
+    // Every file, those two included, is read back from disk and hashed: what the manifest lists is what
+    // was written, and verifying an export later covers all of it.
     const verificationFailures = await this.verifyWrittenFiles(files);
 
     const manifest = this.generateHashManifest(files, messages, { emailsFailed, attachmentsFailed, reconstructed, failed, verificationFailures });
     const manifestPath = path.join(outputDir, 'manifest.txt');
     fs.writeFileSync(manifestPath, manifest.text, 'utf8');
-
-    const sessionManifest = this.generateSessionManifest(projectId, exportId, format, messages, files, options);
-    const sessionManifestPath = path.join(outputDir, 'session_manifest.xml');
-    fs.writeFileSync(sessionManifestPath, sessionManifest.content, 'utf8');
-
-    const metadataCsv = this.generateMetadataCsv(messages);
-    const metadataCsvPath = path.join(outputDir, 'metadata.csv');
-    fs.writeFileSync(metadataCsvPath, metadataCsv.content, 'utf8');
 
     return { files, manifest, sessionManifest, metadataCsv, outputDir, reconstructed, failed, verificationFailures };
   }
@@ -350,7 +354,7 @@ export class ExportService {
     const to = parseJsonField(message.to_addresses || message.toAddresses, []);
     const cc = parseJsonField(message.cc_addresses || message.ccAddresses, []);
     const subject = message.subject || '(no subject)';
-    const date = message.date || new Date().toISOString();
+    const date = message.date;
     const msgId = message.message_id || message.messageId || `<${uuidv4()}@sherlock-mail.local>`;
     const sha256 = message.hash_sha256 || message.hashSha256 || '';
     const bodyText = message.body_text || message.bodyText || '';
@@ -363,7 +367,7 @@ export class ExportService {
       `To: ${Array.isArray(to) ? to.join(', ') : to}`,
       cc.length ? `Cc: ${Array.isArray(cc) ? cc.join(', ') : cc}` : null,
       `Subject: ${subject}`,
-      `Date: ${new Date(date).toUTCString()}`,
+      date ? `Date: ${new Date(date).toUTCString()}` : null,
       `Message-ID: ${msgId}`,
       message.in_reply_to || message.inReplyTo ? `In-Reply-To: ${message.in_reply_to || message.inReplyTo}` : null,
       `MIME-Version: 1.0`,
@@ -531,9 +535,25 @@ export class ExportService {
     return [...threads.values()];
   }
 
-  static generatePdf(messages, projectId, threadLabel = null) {
+  // A plain PDF 1.4 with the standard fonts, whose WinAnsi encoding covers Western European text. Bodies are
+  // wrapped, never cut; a character the fonts cannot show prints as "?" and the report counts them.
+  static generatePdf(messages, projectId, threadLabel = null, attachmentsByMessage = null) {
     const now = new Date().toISOString();
-    const pdfEsc = (str) => String(str ?? '').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+    let replacedChars = 0;
+    const WIN_ANSI_EXTRA = { 0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87, 0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A, 0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91, 0x2019: 0x92, 0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02DC: 0x98, 0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C, 0x017E: 0x9E, 0x0178: 0x9F };
+    const toWinAnsi = (str) => {
+      let out = '';
+      for (const ch of String(str ?? '')) {
+        const cp = ch.codePointAt(0);
+        if (cp === 0x09) out += '    ';
+        else if (cp < 0x20 || cp === 0x7F) { replacedChars++; out += '?'; }
+        else if (cp < 0x80 || (cp >= 0xA0 && cp <= 0xFF)) out += String.fromCharCode(cp);
+        else if (WIN_ANSI_EXTRA[cp]) out += String.fromCharCode(WIN_ANSI_EXTRA[cp]);
+        else { replacedChars++; out += '?'; }
+      }
+      return out;
+    };
+    const pdfEsc = (str) => str.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 
     const objects = [];
     let objNum = 0;
@@ -542,14 +562,15 @@ export class ExportService {
     const catalogNum = addObj('');
     const pagesNum = addObj('');
 
-    const fontNum = addObj('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-    const fontBoldNum = addObj('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
-    const fontMonoNum = addObj('<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>');
+    const encoding = '/Encoding /WinAnsiEncoding';
+    const fontNum = addObj(`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica ${encoding} >>`);
+    const fontBoldNum = addObj(`<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold ${encoding} >>`);
+    const fontMonoNum = addObj(`<< /Type /Font /Subtype /Type1 /BaseFont /Courier ${encoding} >>`);
 
     const pageWidth = 612;
     const pageHeight = 792;
     const margin = 50;
-    const lineHeight = 14;
+    const lineHeight = 12;
     const maxY = pageHeight - margin;
     const contentWidth = pageWidth - 2 * margin;
 
@@ -560,63 +581,94 @@ export class ExportService {
     const flushPage = () => {
       if (currentLines.length === 0) return;
       const stream = currentLines.join('\n');
-      const streamNum = addObj(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
+      const streamNum = addObj(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
       const pageNum = addObj(`<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Contents ${streamNum} 0 R /Resources << /Font << /F1 ${fontNum} 0 R /F2 ${fontBoldNum} 0 R /F3 ${fontMonoNum} 0 R >> >> >>`);
       pageContents.push(pageNum);
       currentLines = [];
       curY = maxY;
     };
 
+    // Average glyph widths are enough to wrap inside the margins: Helvetica about 0.5 em, Courier exactly 0.6.
+    const wrap = (text, font, size) => {
+      const perLine = Math.max(10, Math.floor(contentWidth / (size * (font === '/F3' ? 0.6 : font === '/F2' ? 0.56 : 0.5))));
+      const lines = [];
+      for (let rest = text; ;) {
+        if (rest.length <= perLine) { lines.push(rest); break; }
+        let cut = rest.lastIndexOf(' ', perLine);
+        if (cut < perLine * 0.5) cut = perLine;
+        lines.push(rest.slice(0, cut));
+        rest = rest.slice(cut).replace(/^ /, '');
+      }
+      return lines;
+    };
+
     const addLine = (text, font = '/F1', size = 10) => {
-      if (curY < margin + lineHeight) flushPage();
-      currentLines.push(`BT ${font} ${size} Tf ${margin} ${curY} Td (${pdfEsc(text)}) Tj ET`);
-      curY -= lineHeight;
+      for (const line of wrap(toWinAnsi(text), font, size)) {
+        if (curY < margin + lineHeight) flushPage();
+        currentLines.push(`BT ${font} ${size} Tf ${margin} ${curY} Td (${pdfEsc(line)}) Tj ET`);
+        curY -= Math.max(lineHeight, size + 2);
+      }
     };
 
     const addGap = (px = 8) => { curY -= px; };
+    const addRule = () => {
+      if (curY < margin + lineHeight) flushPage();
+      currentLines.push(`0.8 0.8 0.8 RG ${margin} ${curY + 6} m ${pageWidth - margin} ${curY + 6} l S 0 0 0 RG`);
+    };
 
-    const title = threadLabel ? `Thread: ${threadLabel.substring(0, 80)}` : 'SherlockMail Forensic Email Report';
-    addLine(title, '/F2', 16);
-    curY -= 6;
+    addLine(threadLabel ? `Thread: ${threadLabel}` : 'SherlockMail Forensic Email Report', '/F2', 16);
+    addGap(4);
     addLine(`Project: ${projectId}  |  Generated: ${now}  |  Messages: ${messages.length}`, '/F1', 9);
-    addLine('Tool: SherlockMail v0.9.0  |  Hash Algorithm: SHA-256', '/F1', 9);
+    addLine('Tool: SherlockMail v0.9.0  |  Hash Algorithm: SHA-256  |  Times in UTC', '/F1', 9);
+    addGap(6);
+    addRule();
     addGap(12);
 
-    currentLines.push(`${margin} ${curY + 4} m ${pageWidth - margin} ${curY + 4} l S`);
-    addGap(12);
+    const headerValue = (headers, name) => {
+      const v = headers?.[name];
+      if (v == null) return null;
+      const one = Array.isArray(v) ? v : [v];
+      return one.map(h => (typeof h === 'object' ? (h.text || h.value || JSON.stringify(h)) : String(h)));
+    };
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
       const from = msg.from_address || msg.fromAddress || '';
       const to = parseJsonField(msg.to_addresses || msg.toAddresses, []);
+      const cc = parseJsonField(msg.cc_addresses || msg.ccAddresses, []);
       const subject = msg.subject || '(no subject)';
-      const date = msg.date ? new Date(msg.date).toLocaleString() : 'Unknown';
+      const date = msg.date ? new Date(msg.date).toISOString() : 'No date in the message';
       const sha256 = msg.hash_sha256 || msg.hashSha256 || 'N/A';
-      const folder = msg.folder || '';
-      const body = (msg.body_text || msg.bodyText || '').substring(0, 2000);
+      const body = msg.body_text || msg.bodyText || '';
+      let headers = null;
+      try { headers = JSON.parse(msg.headers_json || 'null'); } catch { /* the record's own fields still print */ }
+      const atts = attachmentsByMessage?.get(msg.id) || [];
 
       if (curY < margin + lineHeight * 8) flushPage();
 
-      addLine(`Message #${i + 1}: ${subject.substring(0, 80)}`, '/F2', 11);
+      addLine(`Message #${i + 1}: ${subject}`, '/F2', 11);
       addGap(4);
       addLine(`From: ${from}`, '/F1', 9);
-      addLine(`To: ${(Array.isArray(to) ? to.join(', ') : to).substring(0, 100)}`, '/F1', 9);
-      addLine(`Date: ${date}    Folder: ${folder}`, '/F1', 9);
+      addLine(`To: ${(Array.isArray(to) ? to.join(', ') : to)}`, '/F1', 9);
+      if (cc.length) addLine(`Cc: ${(Array.isArray(cc) ? cc.join(', ') : cc)}`, '/F1', 9);
+      addLine(`Date: ${date}    Folder: ${msg.folder || ''}`, '/F1', 9);
+      addLine(`Message-ID: ${msg.message_id || msg.messageId || '(none)'}`, '/F1', 9);
+      for (const name of ['received', 'authentication-results', 'return-path', 'reply-to']) {
+        for (const value of headerValue(headers, name) || []) addLine(`${name}: ${value}`, '/F3', 7);
+      }
       addLine(`SHA-256: ${sha256}`, '/F3', 7);
       addGap(4);
+      for (const att of atts) addLine(`Attachment: ${att.filename} (${att.size ?? '?'} bytes)  SHA-256 ${att.hash_sha256 || ''}`, '/F3', 7);
+      if (atts.length) addGap(4);
 
-      if (body) {
-        const bodyLines = body.split(/\r?\n/).slice(0, 15);
-        for (const line of bodyLines) {
-          const truncated = line.substring(0, 90);
-          if (curY < margin + lineHeight) { flushPage(); addLine('(continued)', '/F1', 8); }
-          addLine(truncated, '/F1', 8);
-        }
-        if (body.split(/\r?\n/).length > 15) addLine('...', '/F1', 8);
-      }
+      for (const line of body.split(/\r?\n/)) addLine(line, '/F1', 8);
       addGap(10);
-      currentLines.push(`${margin} ${curY + 6} m ${pageWidth - margin} ${curY + 6} l 0.8 0.8 0.8 RG S 0 0 0 RG`);
+      addRule();
       addGap(10);
+    }
+
+    if (replacedChars) {
+      addLine(`Note: ${replacedChars} character(s) could not be shown in this PDF's fonts and print as "?". The original messages keep them.`, '/F2', 9);
     }
 
     flushPage();
@@ -624,21 +676,22 @@ export class ExportService {
     objects[0].content = `<< /Type /Catalog /Pages ${pagesNum} 0 R >>`;
     objects[1].content = `<< /Type /Pages /Kids [${pageContents.map(n => `${n} 0 R`).join(' ')}] /Count ${pageContents.length} >>`;
 
+    // Every character here is a single byte (latin1), so string lengths are byte offsets.
     let pdf = '%PDF-1.4\n%\xE2\xE3\xCF\xD3\n';
     const offsets = [];
     for (const obj of objects) {
-      offsets.push(Buffer.byteLength(pdf));
+      offsets.push(pdf.length);
       pdf += `${obj.num} 0 obj\n${obj.content}\nendobj\n`;
     }
 
-    const xrefOffset = Buffer.byteLength(pdf);
+    const xrefOffset = pdf.length;
     pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
     for (const off of offsets) {
       pdf += `${String(off).padStart(10, '0')} 00000 n \n`;
     }
     pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogNum} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
 
-    const content = Buffer.from(pdf, 'binary');
+    const content = Buffer.from(pdf, 'latin1');
 
     return {
       content,
@@ -646,12 +699,15 @@ export class ExportService {
       hash: crypto.createHash('sha256').update(content).digest('hex'),
       size: content.length,
       messageCount: messages.length,
+      replacedChars,
     };
   }
 
   static generateConcordanceDat(messages) {
-    const D = 'þ'; // þ (thorn) — Concordance field delimiter
-    const Q = 'ð'; // ð (eth) — Concordance text qualifier
+    // Concordance's default delimiters: DC4 (ASCII 20) between fields, thorn (ASCII 254) around each value.
+    const D = '\u0014';
+    const Q = '\u00fe';
+    const NEWLINE = '\u00ae'; // (registered sign, ASCII 174) stands for a line break inside a value
 
     const fields = [
       'DOCID', 'BATES_BEGIN', 'BATES_END', 'BATES_ATTACH_BEGIN', 'BATES_ATTACH_END',
@@ -670,7 +726,6 @@ export class ExportService {
       const batesBegin = `${batesPrefix}${batesNum}`;
       const batesEnd = batesBegin;
       const attCount = msg.attachment_count || msg.attachmentCount || 0;
-      const batesAttEnd = attCount > 0 ? `${batesPrefix}${String(idx + 1 + attCount).padStart(padLen, '0')}` : '';
 
       const from = msg.from_address || msg.fromAddress || '';
       const to = parseJsonField(msg.to_addresses || msg.toAddresses, []).join('; ');
@@ -678,10 +733,12 @@ export class ExportService {
       const bcc = parseJsonField(msg.bcc_addresses || msg.bccAddresses, []).join('; ');
       const subject = msg.subject || '';
       const d = msg.date ? new Date(msg.date) : null;
-      const dateSent = d ? `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}` : '';
-      const timeSent = d ? d.toTimeString().substring(0, 8) : '';
-      const dateRcvd = msg.acquired_at ? new Date(msg.acquired_at).toLocaleDateString('en-US') : '';
-      const timeRcvd = msg.acquired_at ? new Date(msg.acquired_at).toTimeString().substring(0, 8) : '';
+      const dateSent = d ? `${d.getUTCMonth() + 1}/${d.getUTCDate()}/${d.getUTCFullYear()}` : '';
+      const timeSent = d ? d.toISOString().substring(11, 19) : '';
+      // The server's received time; the time SherlockMail collected a message is not its received date.
+      const rcvd = msg.internal_date ? new Date(msg.internal_date) : null;
+      const dateRcvd = rcvd ? `${rcvd.getUTCMonth() + 1}/${rcvd.getUTCDate()}/${rcvd.getUTCFullYear()}` : '';
+      const timeRcvd = rcvd ? rcvd.toISOString().substring(11, 19) : '';
       const folder = msg.folder || '';
       const hasAtt = msg.has_attachments || msg.hasAttachments ? 'TRUE' : 'FALSE';
       const size = msg.size || 0;
@@ -690,16 +747,17 @@ export class ExportService {
       const parentId = msg.in_reply_to || '';
       const md5 = msg.hash_md5 || msg.hashMd5 || '';
       const sha256 = msg.hash_sha256 || msg.hashSha256 || '';
-      const body = (msg.body_text || msg.bodyText || '').substring(0, 32000).replace(/[\r\n]+/g, ' ');
+      const body = (msg.body_text || msg.bodyText || '').substring(0, 32000).replace(/\r?\n/g, NEWLINE);
 
-      const vals = [msg.id, batesBegin, batesEnd, batesBegin, batesAttEnd || batesEnd,
+      // Attachments stay inside their message, so a family's range is the message's own number.
+      const vals = [msg.id, batesBegin, batesEnd, batesBegin, batesEnd,
         msg.custodian || '', from, to, cc, bcc, subject, dateSent, timeSent,
         dateRcvd, timeRcvd, folder, hasAtt, attCount, size, msgId, convIdx, parentId,
         md5, sha256, body];
-      return vals.map(v => `${Q}${String(v ?? '').replace(/ð/g, '')}${Q}`).join(D);
+      return vals.map(v => `${Q}${String(v ?? '').replace(/[\u0014\u00fe]/g, ' ').replace(/[\r\n]+/g, NEWLINE)}${Q}`).join(D);
     });
 
-    const content = [header, ...rows].join('\r\n') + '\r\n';
+    const content = `\ufeff${[header, ...rows].join('\r\n')}\r\n`;
     return {
       content,
       filename: `loadfile_${new Date().toISOString().replace(/[:.]/g, '-')}.dat`,
@@ -728,7 +786,11 @@ export class ExportService {
 
   static generateXml(messages, projectId) {
     const now = new Date().toISOString();
-    const x = (str) => String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    // XML 1.0 cannot carry most control characters even when escaped; they are replaced and counted.
+    let replacedChars = 0;
+    const legal = (str) => String(str ?? '').replace(/[^\t\n\r\x20-\uD7FF\uE000-\uFFFD\u{10000}-\u{10FFFF}]/gu, () => { replacedChars++; return '\uFFFD'; });
+    const x = (str) => legal(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const cdata = (str) => `<![CDATA[${legal(str).replace(/]]>/g, ']]]]><![CDATA[>')}]]>`;
 
     const msgElements = messages.map((msg, idx) => {
       const from = msg.from_address || msg.fromAddress || '';
@@ -758,7 +820,7 @@ export class ExportService {
     <hasAttachments>${msg.has_attachments || msg.hasAttachments ? 'true' : 'false'}</hasAttachments>
     <attachmentCount>${msg.attachment_count || msg.attachmentCount || 0}</attachmentCount>
     <acquiredAt>${x(msg.acquired_at || '')}</acquiredAt>
-    <body encoding="plain"><![CDATA[${body}]]></body>
+    <body encoding="plain">${cdata(body)}</body>
   </message>`;
     }).join('\n');
 
@@ -767,6 +829,7 @@ export class ExportService {
   <project id="${x(projectId)}"/>
   <summary>
     <totalMessages>${messages.length}</totalMessages>
+    <charactersNotRepresentable>${replacedChars}</charactersNotRepresentable>
     <hashAlgorithm>SHA-256</hashAlgorithm>
     <exportDate>${x(now)}</exportDate>
   </summary>
@@ -986,7 +1049,7 @@ ${fileEntries}
     };
   }
 
-  static verifyExport(exportDir) {
+  static async verifyExport(exportDir) {
     const manifestPath = path.join(exportDir, 'manifest.txt');
     if (!fs.existsSync(manifestPath)) return { valid: false, error: 'Manifest not found' };
 
@@ -1009,19 +1072,23 @@ ${fileEntries}
         results.push({ filename: fileEntry.filename, status: 'missing' });
         continue;
       }
-      const content = fs.readFileSync(filePath);
-      const hash = crypto.createHash('sha256').update(content).digest('hex');
+      const sha = crypto.createHash('sha256');
+      let size = 0;
+      // A PST part can be far larger than a Buffer can hold.
+      for await (const chunk of fs.createReadStream(filePath)) { sha.update(chunk); size += chunk.length; }
+      const hash = sha.digest('hex');
       results.push({
         filename: fileEntry.filename,
         expectedHash: fileEntry.sha256,
         computedHash: hash,
         status: hash === fileEntry.sha256 ? 'verified' : 'mismatch',
-        size: content.length,
+        size,
       });
     }
 
     return {
-      valid: results.every(r => r.status === 'verified'),
+      valid: results.length > 0 && results.every(r => r.status === 'verified'),
+      error: results.length ? undefined : 'The manifest lists no files',
       totalFiles: results.length,
       verified: results.filter(r => r.status === 'verified').length,
       failed: results.filter(r => r.status !== 'verified').length,
@@ -1048,6 +1115,14 @@ ${fileEntries}
     }
     return exports;
   }
+}
+
+function uniquePath(dir, name) {
+  const ext = path.extname(name);
+  const base = name.slice(0, name.length - ext.length);
+  let candidate = path.join(dir, name);
+  for (let n = 2; fs.existsSync(candidate); n++) candidate = path.join(dir, `${base} (${n})${ext}`);
+  return candidate;
 }
 
 function csvCell(value) {

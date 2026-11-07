@@ -83,15 +83,29 @@ function saveTokens(tokens) {
   fs.writeFileSync(getTokensPath(), JSON.stringify(tokens, null, 2));
 }
 
-export function getAuthUrl() {
+const FEATURE_SCOPES = {
+  calendar: 'https://www.googleapis.com/auth/calendar.readonly',
+  contacts: 'https://www.googleapis.com/auth/contacts.readonly',
+};
+
+export function getAuthUrl(features = []) {
   const client = getOAuth2Client();
   if (!client) return null;
 
   return client.generateAuthUrl({
     access_type: 'offline',
-    scope: SCOPES,
+    scope: [...SCOPES, ...features.map(f => FEATURE_SCOPES[f]).filter(Boolean)],
+    include_granted_scopes: true,
     prompt: 'consent',
   });
+}
+
+export async function getGoogleAccessToken() {
+  const client = getOAuth2Client();
+  if (!client || !getAuthStatus().authorized) throw new Error('Google account not authorized. Click "Authorize with Google" first.');
+  const { token } = await client.getAccessToken();
+  if (!token) throw new Error('Google did not issue an access token');
+  return token;
 }
 
 export function getAuthStatus() {

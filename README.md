@@ -75,24 +75,31 @@ After collection, the Review tab provides:
 - **Full header analysis** for any message
 - **Inline search engine** supporting boolean operators, regex, wildcards, fuzzy matching, proximity search, field-specific queries (`from:`, `to:`, `subject:`, `sent:`), and date ranges
 - **Email threading** reconstructed from In-Reply-To and References headers
-- **Encryption and signature detection** flagging S/MIME and PGP messages
+- **Signature checks and decryption**: S/MIME signatures are verified against the collected bytes and the signer's certificate chain; encrypted S/MIME messages can be decrypted to a separate copy with the recipient's key. PGP messages are flagged but not verified or decrypted, which needs the keys in a PGP tool
 - **Cloud attachment detection** identifying links to Google Drive, OneDrive, SharePoint, Dropbox, and Box
 
 ### 4. Quality Control
 
-The QC tab runs 11 automated checks:
+The Quality check screen runs these checks and reports what it actually found:
 
-1. **Collection Completeness** — All acquisitions completed successfully
-2. **Hash Integrity** — SHA-256 hashes present on every message
-3. **Duplicate Detection** — Messages with identical hashes flagged
-4. **Date Consistency** — No missing or future-dated messages
-5. **Required Fields** — All messages have essential metadata
-6. **Folder Coverage** — Every enumerated folder has been collected
-7. **Export Completeness** — Export counts match collection counts
-8. **Audit Trail** — Hash-chained audit log is intact
-9. **Encryption Detection** — Encrypted or signed messages are flagged
-10. **Write Protection (ISO 27037)** — Confirms read-only access was used
-11. **DFIR Standards Compliance** — Case metadata, examiner info, legal authority, and hashing are all present
+1. **Collection Completeness** — Every enumerated item was collected, skipped or recorded as failed
+2. **Hash Integrity** — Every collected file is re-read and matched to its recorded SHA-256
+3. **Duplicate Detection** — Messages with identical hashes or Message-IDs flagged
+4. **Date Consistency** — Missing or future-dated messages flagged
+5. **Required Fields** — Messages missing a sender or subject flagged
+6. **Folder Coverage** — Every selected folder could be read
+7. **Export Completeness** — At least one export covers every message
+8. **Audit Trail** — The hash chain is recomputed and every link checked
+9. **Encryption & Signing Detection** — S/MIME and PGP messages counted
+10. **Write Protection (ISO 27037)** — Judged from each acquisition's protocol log (IMAP `EXAMINE`, confirmed read-only by the server)
+11. **DFIR Standards Compliance** — Case metadata, examiner, legal authority and hashes present
+12. **Attachment Completeness** — Every attachment recorded with its hash
+13. **Timestamp Verification** — Each message's Date header still matches what was recorded
+14. **Protocol Log Completeness** — Each acquisition has a protocol log and any errors are surfaced
+15. **Cloud Attachment Coverage** — Links to cloud files found, and whether they were preserved
+16. **Drive File Verification** — Downloaded drive files re-hashed
+17. **Export Integrity** — Every file each export's manifest lists is re-hashed
+18. **Collection Resumability** — Interrupted acquisitions flagged, with how to complete them
 
 ### 5. Export
 
@@ -101,12 +108,12 @@ Export collected evidence to any combination of 8 formats:
 | Format | Use Case |
 |--------|----------|
 | **EML** (RFC 5322) | Gold standard — one file per message with full headers, MIME structure, attachments |
-| **MSG** (Outlook) | Microsoft OLE/COM format for Outlook compatibility |
+| **MSG** (Outlook) | Genuine MS-OXMSG files converted from the original message, with an item map to its SHA-256 |
 | **PST** (Personal Storage) | Single container with folder hierarchy |
 | **MBOX** (Unix Mailbox) | Concatenated messages for batch processing tools |
 | **MIME** (Raw) | Exact server response for maximum forensic integrity |
-| **PDF Report** | Printable report with metadata, headers, body, and hashes for court submission |
-| **Concordance DAT** | eDiscovery load file with Bates numbering (SM-0000001) and thorn/eth delimiters |
+| **PDF Report** | Printable report with metadata, routing headers, the full body, attachment names and hashes. Western European text; other characters print as "?" and the report counts them, so keep the EML export as the evidence |
+| **Concordance DAT** | eDiscovery load file with Bates numbering (SM-0000001) and Concordance's default delimiters (ASCII 20, 254, 174) |
 | **XML** (Structured) | Structured export for case management systems, XSLT, and database imports |
 
 Every export includes a SHA-256 hash manifest. RFC 3161 timestamps are generated automatically at export time.
@@ -171,15 +178,25 @@ Every collected message is hashed with MD5, SHA-256, and SHA-512 at acquisition 
 The audit log records every action — project creation, connection tests, acquisitions, searches, QC runs, exports, and integrity checks. Each entry is linked to the previous by a SHA-256 hash chain: `hash = SHA-256(previousHash | timestamp | eventType | description)`. Modifying any entry breaks the chain, which QC check #8 detects.
 
 ### RFC 3161 Timestamps
-Cryptographic timestamps are generated for collection and export events, recording the hash algorithm, message digest, serial number, and generation time.
+After each collection and export, a SHA-256 hash is sent to an external Timestamp Authority (DigiCert, Sectigo, GlobalSign or FreeTSA, tried in that order), and its signed token is verified on receipt: signature, hash, nonce and timestamping certificate. The token is saved beside the file it covers (`Logs/collection_hashes_*.txt.tsr`, `manifest.txt.tsr`), so anyone can check it independently:
 
-> **Note**: SherlockMail uses an internal Timestamp Authority. These timestamps prove internal consistency but are not issued by an accredited QTSP. For court-admissible timestamps, submit hash digests to a production TSA (DigiCert, Sectigo, GlobalSign, or FreeTSA).
+```
+openssl ts -verify -data manifest.txt -in manifest.txt.tsr -token_in -CAfile <authority's root certificate>
+```
+
+Only the hash leaves the computer. If no authority can be reached, the collection or export still finishes and the record says no trusted timestamp was issued; nothing stands in for it. Set `SHERLOCKMAIL_TSA_URLS` to use your own authority, or to `off` to contact none. Whether a given authority meets a jurisdiction's rules (for example eIDAS qualified status) is for the examiner to confirm.
 
 ### Write Protection
-IMAP connections use EXAMINE mode (read-only). API-based protocols request read-only scopes. QC check #10 verifies that read-only access was maintained throughout collection.
+IMAP connections use EXAMINE mode, and a collection stops if the server does not confirm read-only. API-based protocols request read-only scopes and send only read requests. POP3 has no read-only mode: SherlockMail never sends DELE, but some servers delete mail after retrieval, so QC check #10 warns about it.
 
 ### Differential Collection
 Subsequent collections against the same mailbox skip previously acquired messages (matched by Message-ID and SHA-256 hash), collecting only new items.
+
+### Folder Snapshots
+Each collection reads the server's folder list and counts before the first message and after the last, and records whether the mailbox changed in between.
+
+### Forensic Containers
+A folder of evidence can be packaged into a VHDX disk image (exFAT in an MBR partition) that Windows and forensic tools can mount. Every file is read back through the image and matched by SHA-256 before it is finished.
 
 ---
 
@@ -195,7 +212,7 @@ Subsequent collections against the same mailbox skip previously acquired message
 | **ACPO Principles v5** | Principle 1: no alteration of source data (read-only access) |
 | **EDRM Collection Standards** | Repeatable processes with documented risks and defensible methodology |
 | **FRE 901(b)(9) / 902(14)** | Process producing accurate results; certified data from electronic process |
-| **RFC 3161** | Trusted timestamp structure for collection and export events |
+| **RFC 3161** | Trusted timestamps from an external authority for collection and export events |
 
 ---
 
@@ -210,9 +227,10 @@ SherlockMail uses a tab-based interface:
 | **Projects** | Create and manage cases. Each project stores case metadata, target email, and all associated evidence. |
 | **Tracker** | Dashboard showing acquisition status across projects. |
 | **Collect** | 9-step collection wizard for running acquisitions. |
-| **QC** | Run and review the 11-point quality control suite. |
+| **Quality check** | Run and review the quality control suite, trusted timestamps, integrity verification and analytics. |
 | **Export** | Export evidence in up to 8 formats with hash manifests. |
-| **Review** | Browse collected messages, view headers, search, and analyze. |
+| **Review** | Browse collected messages by folder, read them, analyze headers, check signatures, search. |
+| **Tools** | Import EML/MBOX/PST, inspect Exchange (Recoverable Items, archive, inbox rules, public folders), calendar and contacts, folder snapshots, collecting several mailboxes, reports, certificates, enterprise and Yahoo sign-ins, diagnostics, proxy, e-mail notifications. |
 | **Guide** | Built-in 13-section reference covering all features, protocols, and standards. |
 
 ### Technology
@@ -220,7 +238,8 @@ SherlockMail uses a tab-based interface:
 - **Desktop runtime**: Electron (Chromium + Node.js)
 - **Backend**: Express.js REST API running locally
 - **Database**: Node.js built-in SQLite (`node:sqlite`, DatabaseSync) with WAL mode
-- **All data stored locally** in the `data/` directory — nothing is sent to external servers except the configured mail server during collection
+- **All data stored locally** in the `data/` directory. Besides the configured mail server, the only outside contact is a hash sent to a Timestamp Authority (see above), plus a notification e-mail or proxy if you set those up
+- **Command line**: `node server.js <status|collect|import|search|qc|verify|export|timestamp> ...` prints JSON and exits non-zero when the evidence or the operation has a problem. Run `node server.js --help`
 
 ---
 
@@ -250,9 +269,15 @@ SherlockMail/
       jmap-handler.js      JMAP (RFC 8621)
     services/
       export-service.js    8-format export engine
-      quality-control.js   11-check QC suite
+      quality-control.js   QC suite
       inline-search.js     Search engine
-      timestamp-service.js RFC 3161 timestamps
+      rfc3161-timestamp.js RFC 3161 requests and token verification
+      timestamp-service.js Timestamps for collections and exports
+      cms.js               CMS (RFC 5652): signature verification and decryption
+      crypto-service.js    S/MIME
+      container-service.js VHDX forensic containers
+      local-import.js      EML, MBOX and PST import
+      exchange-advanced.js Recoverable Items, archive, inbox rules, public folders
       hash-manager.js      MD5 / SHA-256 / SHA-512
       google-oauth.js      Google OAuth 2.0 flow
       microsoft-oauth.js   Microsoft OAuth 2.0 flow

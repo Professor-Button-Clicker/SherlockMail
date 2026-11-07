@@ -38,8 +38,8 @@
           <input type="text" id="global-search" placeholder="Search messages" onkeydown="if(event.key==='Enter') globalSearch()">
           <label for="search-type" class="visually-hidden">Search type</label>
           <select id="search-type">
-            <option value="basic">Basic</option>
-            <option value="inline">Inline</option>
+            <option value="inline">Search syntax</option>
+            <option value="basic">Plain words</option>
           </select>
         </div>
       </div>
@@ -71,6 +71,7 @@
               <button type="button" class="nav-sub-tab" data-tab="forensics" data-step="checked" onclick="switchTab('forensics')"><span class="nav-step-num">3</span>Quality check</button>
               <button type="button" class="nav-sub-tab" data-tab="export" data-step="exported" onclick="switchTab('export')"><span class="nav-step-num">4</span>Export</button>
               <button type="button" class="nav-sub-tab" data-tab="audit" onclick="switchTab('audit')">Chain of custody</button>
+              <button type="button" class="nav-sub-tab" data-tab="tools" onclick="switchTab('tools')">Tools</button>
               <button type="button" class="nav-sub-tab" data-tab="project-detail" onclick="switchTab(currentProject ? 'project-detail' : 'projects')">Project details</button>
             </div>
           </div>
@@ -130,6 +131,8 @@
         <div id="view-messages" class="message-list-panel">
           <div class="message-list-header">
             <span id="message-list-title">Select a project to view messages</span>
+            <label for="message-folder-filter" class="visually-hidden">Folder</label>
+            <select id="message-folder-filter" onchange="selectFolder(this.value)" style="display:none;max-width:260px;font-size:12px;padding:2px 6px;margin-left:12px"></select>
             <span class="msg-count" id="message-count"></span>
           </div>
           <div class="message-list" id="message-list">
@@ -229,6 +232,7 @@
               <button type="submit" class="btn btn-primary" id="det-save-btn">Save Changes</button>
               <button type="button" class="btn btn-secondary" onclick="switchTab('projects')">Back to Projects</button>
               <button type="button" class="btn btn-secondary" onclick="openProjectReview()" style="margin-left:auto">Open in Review</button>
+              <button type="button" class="btn btn-secondary" onclick="deleteProject()" style="color:var(--danger)">Delete project</button>
             </div>
           </form>
         </div>
@@ -289,8 +293,8 @@
 
           <div style="margin-bottom:16px">
             <p style="font-size:11px;color:var(--text-muted);max-width:700px;line-height:1.5">
-              <strong style="color:var(--text-secondary)">Tip:</strong> Use the builder above or type inline syntax directly. Fields: from, to, cc, bcc, subject, messageid, sent, attachmentcount.
-              Wildcards: * and ?. Regex: /pattern/. Fuzzy: term~. Proximity: "word1 word2"~5
+              <strong style="color:var(--text-secondary)">Tip:</strong> Use the builder above or type the syntax directly. Fields: from, to, cc, bcc, subject, body, folder, messageid, attachment, sent:[2026/01/01 TO 2026/03/31], size:&gt;1M, attachmentcount:[1 TO 5], has:attachment, is:encrypted, is:signed.
+              AND, OR, NOT and parentheses. Wildcards: * and ?. Regex: /pattern/. Fuzzy: term~. Proximity: "word1 word2"~5
             </p>
           </div>
           <div id="search-results"></div>
@@ -410,7 +414,8 @@
                       <select id="wiz-auth-method" onchange="wizUpdateAuthLabel()">
                         <option value="password">Password</option>
                         <option value="app-password">App-Specific Password</option>
-                        <option value="oauth2">OAuth 2.0</option>
+                        <option value="oauth2">OAuth 2.0 access token</option>
+                        <option value="yahoo_oauth">Yahoo sign-in</option>
                       </select>
                     </div>
                     <div class="form-group">
@@ -941,10 +946,10 @@
               <select id="export-format" style="max-width:300px" onchange="togglePdfSplitMode()">
                 <option value="eml">EML (MIME) — Individual files</option>
                 <option value="mbox">MBOX — Unix mailbox</option>
-                <option value="msg">MSG — Containerized</option>
+                <option value="msg">MSG — Outlook message files</option>
                 <option value="pst">PST — Outlook data file</option>
                 <option value="mime">MIME — Raw source</option>
-                <option value="pdf">PDF Report — Printable HTML</option>
+                <option value="pdf">PDF Report — Printable report</option>
                 <option value="concordance">Concordance DAT — eDiscovery load file</option>
                 <option value="xml">XML — Structured data export</option>
               </select>
@@ -972,6 +977,50 @@
             </div>
             <div id="export-results"></div>
             <div id="export-history" style="margin-top:32px"></div>
+
+            <h3 style="margin:32px 0 8px;font-size:15px">Package as a VHDX disk image</h3>
+            <p class="form-hint" style="margin-bottom:12px">Puts a folder into one mountable virtual disk (exFAT), reads every file back to verify it, and hashes the image. Leave the source empty to package the latest export.</p>
+            <div class="form-group">
+              <label for="vhdx-source">Folder to package</label>
+              <div style="display:flex;gap:8px;max-width:640px">
+                <input type="text" id="vhdx-source" placeholder="The latest export" style="flex:1">
+                <button class="btn btn-secondary" type="button" onclick="toolPickFolder('vhdx-source')">Browse</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="vhdx-output">Save the image in</label>
+              <div style="display:flex;gap:8px;max-width:640px">
+                <input type="text" id="vhdx-output" placeholder="Leave empty to use SherlockMail's data folder" style="flex:1">
+                <button class="btn btn-secondary" type="button" onclick="toolPickFolder('vhdx-output')">Browse</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+              <button class="btn btn-primary" onclick="packageVhdx()">Create VHDX</button>
+              <span id="vhdx-status" role="status"></span>
+            </div>
+            <div id="vhdx-results"></div>
+
+            <h3 style="margin:32px 0 8px;font-size:15px">Metadata lists</h3>
+            <p class="form-hint" style="margin-bottom:12px">A spreadsheet of what this project holds.</p>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+              <label for="metadata-type" class="visually-hidden">List</label>
+              <select id="metadata-type" style="max-width:220px">
+                <option value="email">Messages</option>
+                <option value="attachment">Attachments</option>
+                <option value="hash">All hashes</option>
+                <option value="audit">Chain of custody log</option>
+                <option value="drive">Drive files</option>
+                <option value="document">Drive documents</option>
+                <option value="calendar">Calendar events</option>
+                <option value="contact">Contacts</option>
+                <option value="timestamp">Trusted timestamps</option>
+                <option value="snapshot">Folder snapshots</option>
+              </select>
+              <label for="metadata-format" class="visually-hidden">Format</label>
+              <select id="metadata-format" style="max-width:100px"><option value="csv">CSV</option><option value="tsv">TSV</option></select>
+              <button class="btn btn-secondary" onclick="downloadMetadata()">Download</button>
+              <span id="metadata-status" role="status"></span>
+            </div>
 
             <h3 style="margin:32px 0 8px;font-size:15px">Convert EML / MBOX files to PST</h3>
             <p class="form-hint" style="margin-bottom:12px">Converts messages already on disk (a folder of .eml files, .mbox mailboxes, or a single file). The source files are only read.</p>
@@ -1045,19 +1094,20 @@
           <!-- Timestamps Sub-panel -->
           <div class="sub-panel" id="forensics-timestamps">
             <h3 style="margin-bottom:16px">RFC 3161 Timestamps</h3>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Create cryptographic timestamps to prove data existed at a specific time.</p>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px;max-width:72ch">An outside Timestamp Authority signs the hash of your evidence list, which proves it existed at that time. Only the hash leaves this computer. Collections and exports request one automatically; a token is kept beside each file it covers.</p>
             <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px;flex-wrap:wrap">
               <button class="btn btn-primary" onclick="createTimestamp('collection')">Timestamp Collection</button>
               <button class="btn btn-secondary" onclick="createTimestamp('export')">Timestamp Latest Export</button>
               <span id="ts-status"></span>
             </div>
             <div id="ts-results"></div>
+            <div id="ts-history"></div>
           </div>
 
           <!-- Integrity Sub-panel -->
           <div class="sub-panel" id="forensics-integrity">
             <h3 style="margin-bottom:16px">Evidence Integrity Verification</h3>
-            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Comprehensive verification of hash integrity, audit chain, exports, and RFC 3161 timestamps.</p>
+            <p style="color:var(--text-muted);font-size:13px;margin-bottom:16px">Re-hashes every collected and exported file and checks the chain of custody log.</p>
             <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
               <button class="btn btn-primary" onclick="verifyIntegrity()">Verify All Evidence</button>
               <span id="integrity-status"></span>
@@ -1135,6 +1185,7 @@
                 <li><a href="#" onclick="guideScroll('guide-collection')">Running a Collection</a></li>
                 <li><a href="#" onclick="guideScroll('guide-formats')">Export Formats</a></li>
                 <li><a href="#" onclick="guideScroll('guide-qc')">Quality Control</a></li>
+                <li><a href="#" onclick="guideScroll('guide-tools')">Tools</a></li>
                 <li><a href="#" onclick="guideScroll('guide-cloud')">Cloud Attachments</a></li>
                 <li><a href="#" onclick="guideScroll('guide-timestamps')">RFC 3161 Timestamps</a></li>
                 <li><a href="#" onclick="guideScroll('guide-search')">Inline Search</a></li>
@@ -1239,23 +1290,30 @@
             </section>
 
             <section id="guide-qc" class="guide-section">
-              <h3>Quality Control (11 Checks)</h3>
+              <h3>Quality Control</h3>
               <ol class="guide-steps">
-                <li><strong>Collection Completeness</strong> &mdash; Verifies all acquisitions completed successfully</li>
-                <li><strong>Hash Integrity</strong> &mdash; Confirms SHA-256 hashes on all messages</li>
-                <li><strong>Duplicate Detection</strong> &mdash; Identifies messages with identical hashes</li>
+                <li><strong>Collection Completeness</strong> &mdash; Every enumerated item was collected, skipped or recorded as failed</li>
+                <li><strong>Hash Integrity</strong> &mdash; Re-reads every collected file and matches its recorded SHA-256</li>
+                <li><strong>Duplicate Detection</strong> &mdash; Identifies messages with identical hashes or Message-IDs</li>
                 <li><strong>Date Consistency</strong> &mdash; Checks for messages with missing or future dates</li>
-                <li><strong>Missing Fields</strong> &mdash; Scans for messages lacking required metadata</li>
-                <li><strong>Folder Coverage</strong> &mdash; Ensures all enumerated folders have messages</li>
-                <li><strong>Export Completeness</strong> &mdash; Verifies export record counts match</li>
-                <li><strong>Audit Trail</strong> &mdash; Validates hash-chained audit log integrity</li>
-                <li><strong>Encryption Detection</strong> &mdash; Flags encrypted/signed messages</li>
-                <li><strong>Write Protection (ISO 27037)</strong> &mdash; Verifies collection used read-only access (EXAMINE mode)</li>
+                <li><strong>Required Fields</strong> &mdash; Scans for messages lacking a sender or subject</li>
+                <li><strong>Folder Coverage</strong> &mdash; Every selected folder could be read</li>
+                <li><strong>Export Completeness</strong> &mdash; At least one export covers every message</li>
+                <li><strong>Audit Trail</strong> &mdash; Recomputes the hash chain of the audit log, entry by entry</li>
+                <li><strong>Encryption &amp; Signing Detection</strong> &mdash; Flags encrypted and signed messages</li>
+                <li><strong>Write Protection (ISO 27037)</strong> &mdash; Judged from the acquisition's protocol log (EXAMINE, confirmed read-only by the server)</li>
                 <li><strong>DFIR Standards Compliance</strong> &mdash; Checks examiner, legal authority, case ID, hashing, acquisitions</li>
+                <li><strong>Attachment Completeness</strong> &mdash; Every attachment recorded with its hash</li>
+                <li><strong>Timestamp Verification</strong> &mdash; Each message's Date header still matches what was recorded</li>
+                <li><strong>Protocol Log Completeness</strong> &mdash; Each acquisition has a protocol log; errors surfaced</li>
+                <li><strong>Cloud Attachment Coverage</strong> &mdash; Cloud links found, and whether they were preserved</li>
+                <li><strong>Drive File Verification</strong> &mdash; Downloaded drive files re-hashed</li>
+                <li><strong>Export Integrity</strong> &mdash; Every file each export's manifest lists is re-hashed</li>
+                <li><strong>Collection Resumability</strong> &mdash; Interrupted acquisitions flagged</li>
               </ol>
               <div class="guide-callout guide-callout-warn">
                 <strong>Forensic Integrity Notice</strong>
-                <p>SherlockMail never fabricates QC results. All verifications report honest results: PASS or ISSUES_FOUND with detailed diagnostics.</p>
+                <p>SherlockMail never fabricates QC results. Each check looks at the evidence itself and reports passed, warning or failed with what it found.</p>
               </div>
             </section>
 
@@ -1273,16 +1331,17 @@
 
             <section id="guide-timestamps" class="guide-section">
               <h3>RFC 3161 Timestamps</h3>
-              <p>Cryptographic timestamps provide tamper-evident proof that data existed at a specific time:</p>
+              <p>An external Timestamp Authority (TSA) signs a hash of your evidence list, proving it existed at that time:</p>
               <ul>
-                <li><strong>Collection timestamps</strong> &mdash; Generated after each acquisition</li>
-                <li><strong>Export timestamps</strong> &mdash; Generated after each export</li>
-                <li>Includes serial number, generation time, hash algorithm, and message digest</li>
-                <li>Conforms to RFC 3161 structure (Internet X.509 PKI Time-Stamp Protocol)</li>
+                <li><strong>Collection timestamps</strong> &mdash; Requested after each acquisition, over <code>Logs\collection_hashes_*.txt</code></li>
+                <li><strong>Export timestamps</strong> &mdash; Requested after each export, over <code>manifest.txt</code></li>
+                <li>Only a SHA-256 hash leaves this computer, never any message content</li>
+                <li>Each token is verified on receipt (signature, hash, nonce, timestamping certificate) and saved beside its file as <code>.tsr</code></li>
+                <li>Anyone can check one: <code>openssl ts -verify -data manifest.txt -in manifest.txt.tsr -token_in -CAfile root.pem</code></li>
               </ul>
               <div class="guide-callout guide-callout-warn">
-                <strong>Internal TSA Limitation</strong>
-                <p>SherlockMail uses an internal Timestamp Authority. These timestamps prove internal consistency but are not issued by an accredited QTSP (Qualified Trust Service Provider) per ETSI EN 319 421/422. For legally binding timestamps admissible in court, submit hash digests to a production TSA such as DigiCert, Sectigo, or GlobalSign.</p>
+                <strong>When no authority can be reached</strong>
+                <p>The collection or export still finishes, and the record says no trusted timestamp was issued. Nothing stands in for it; you can request one later from Quality check. Authorities are tried in order: DigiCert, Sectigo, GlobalSign, FreeTSA. To work with no internet contact at all, start SherlockMail with <code>SHERLOCKMAIL_TSA_URLS=off</code>.</p>
               </div>
             </section>
 
@@ -1321,9 +1380,25 @@
                 <li><strong>Message hash verification</strong> &mdash; SHA-256 integrity on all messages</li>
                 <li><strong>Audit chain verification</strong> &mdash; Hash-chain integrity on the audit log</li>
                 <li><strong>Export verification</strong> &mdash; File hash verification on exported files</li>
-                <li><strong>Timestamp records</strong> &mdash; Count and validity of RFC 3161 timestamps</li>
+                <li><strong>Trusted timestamps</strong> &mdash; Each RFC 3161 token is re-verified against the file it covers</li>
               </ul>
               <p>Standards: NIST FIPS 180-4, NIST SP 800-86, FRE 901(b)(9) / FRE 902(14), RFC 3161</p>
+            </section>
+
+            <section id="guide-tools" class="guide-section">
+              <h3>Tools</h3>
+              <ul>
+                <li><strong>Import</strong> &mdash; EML and MBOX messages are stored byte for byte; PST items are rebuilt as EML and labelled as reconstructions. Sources are only read, and hashed before and after.</li>
+                <li><strong>Exchange</strong> &mdash; Reads Recoverable Items, the online archive, inbox rules, public folders and the server version over EWS. Recoverable Items and the archive can also be selected in Collect, step 4.</li>
+                <li><strong>Calendar &amp; Contacts</strong> &mdash; Whole listings, with the raw response saved and hashed.</li>
+                <li><strong>Folder Snapshots</strong> &mdash; Live folder lists; each collection takes one before and one after.</li>
+                <li><strong>Several Mailboxes</strong> &mdash; One project per mailbox, collected in turn.</li>
+                <li><strong>Reports</strong> &mdash; History report, drive file revisions, an archive of all logs.</li>
+                <li><strong>Certificates</strong> &mdash; Trusted issuers for signature checks; recipient keys for decrypting a copy. The evidence is never changed.</li>
+                <li><strong>Other Sign-ins</strong> &mdash; Microsoft app-only (with government and national clouds), imported tokens, Yahoo.</li>
+                <li><strong>Diagnostics</strong> &mdash; Connection and certificate test, DNS lookup of a domain's mail servers, Autodiscover, computer health.</li>
+                <li><strong>Settings</strong> &mdash; Proxy for all connections; e-mail when a collection finishes.</li>
+              </ul>
             </section>
 
             <section id="guide-security" class="guide-section">
@@ -1335,7 +1410,7 @@
                 <li>SHA-256 hashing on all messages at acquisition time</li>
                 <li>All exports preserve original MIME source data</li>
                 <li>QC verification provides honest, verifiable results</li>
-                <li>RFC 3161 timestamps for collection and export events</li>
+                <li>RFC 3161 timestamps from an external authority for collection and export events; only a hash leaves the computer</li>
               </ul>
             </section>
 
@@ -1399,7 +1474,7 @@
                 <thead><tr><th>Standard</th><th>Application</th></tr></thead>
                 <tbody>
                   <tr><td>NIST FIPS 180-4</td><td>SHA-256/SHA-512 hash algorithms for evidence integrity</td></tr>
-                  <tr><td>RFC 3161</td><td>Trusted timestamping structure (use production TSA for legal binding)</td></tr>
+                  <tr><td>RFC 3161</td><td>Trusted timestamps from an external authority, verified on receipt</td></tr>
                   <tr><td>RFC 5322 / RFC 9051</td><td>Email message format / IMAP4rev2 protocol compliance</td></tr>
                   <tr><td>RFC 8621</td><td>JMAP protocol for modern email access (Fastmail)</td></tr>
                 </tbody>
@@ -1407,13 +1482,250 @@
 
               <div class="guide-callout guide-callout-warn">
                 <strong>Important Disclaimer</strong>
-                <p>SherlockMail generates RFC 3161-<em>structured</em> timestamps internally. For legally binding timestamps with evidentiary weight, connect to a qualified Timestamp Authority (TSA) such as DigiCert, Sectigo, or FreeTSA. Internal timestamps prove internal consistency but lack independent third-party attestation required by some jurisdictions and by ETSI EN 319 421/422.</p>
+                <p>Timestamps come from public Timestamp Authorities such as DigiCert and Sectigo, not from SherlockMail. If your jurisdiction requires a qualified provider (for example under eIDAS and ETSI EN 319 421/422), confirm the authority meets it, and set your own with SHERLOCKMAIL_TSA_URLS.</p>
               </div>
               <div class="guide-callout">
                 <strong>Deviation Documentation</strong>
                 <p>Per SWGDE guidelines, if you encounter situations warranting deviation from standard collection practices, thoroughly document the specifics in the project notes and audit log. SherlockMail logs all protocol interactions and collection parameters automatically, but examiner notes on deviations should be added manually to the chain of custody.</p>
               </div>
             </section>
+          </div>
+        </div>
+
+        <!-- ========== TOOLS TAB ========== -->
+        <div id="view-tools" class="panel-view">
+          <h2>Tools</h2>
+          <p class="wizard-desc" style="margin-bottom:24px">Everything beyond the four main steps.</p>
+          <div class="sub-tabs" id="tools-sub-tabs">
+            <div class="sub-tab active" data-subtab="import" onclick="switchToolsTab('import')">Import</div>
+            <div class="sub-tab" data-subtab="exchange" onclick="switchToolsTab('exchange')">Exchange</div>
+            <div class="sub-tab" data-subtab="cloud" onclick="switchToolsTab('cloud')">Calendar &amp; Contacts</div>
+            <div class="sub-tab" data-subtab="snapshots" onclick="switchToolsTab('snapshots')">Folder Snapshots</div>
+            <div class="sub-tab" data-subtab="batch" onclick="switchToolsTab('batch')">Several Mailboxes</div>
+            <div class="sub-tab" data-subtab="reports" onclick="switchToolsTab('reports')">Reports</div>
+            <div class="sub-tab" data-subtab="certificates" onclick="switchToolsTab('certificates')">Certificates</div>
+            <div class="sub-tab" data-subtab="signins" onclick="switchToolsTab('signins')">Other Sign-ins</div>
+            <div class="sub-tab" data-subtab="diagnostics" onclick="switchToolsTab('diagnostics')">Diagnostics</div>
+            <div class="sub-tab" data-subtab="settings" onclick="switchToolsTab('settings')">Settings</div>
+          </div>
+
+          <div class="sub-panel active" id="tools-import">
+            <h3 style="margin-bottom:8px">Import mail files into this project</h3>
+            <p class="form-hint" style="margin-bottom:12px;max-width:72ch">EML (one file or a folder) and MBOX messages are kept byte for byte. A PST holds properties, not the original messages, so its items are rebuilt as EML and labelled as reconstructions. The source is only read, and hashed before and after.</p>
+            <div class="form-group">
+              <label for="import-path">File or folder</label>
+              <div style="display:flex;gap:8px;max-width:640px">
+                <input type="text" id="import-path" placeholder="C:\Evidence\mailbox.pst" style="flex:1">
+                <button class="btn btn-secondary" type="button" onclick="toolPickFolder('import-path')">Browse folders</button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="import-folder">Folder name in the project (optional)</label>
+              <input type="text" id="import-folder" placeholder="Imported/..." style="max-width:320px">
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+              <button class="btn btn-primary" onclick="runImport()">Import</button>
+              <span id="import-status" role="status"></span>
+            </div>
+            <div id="import-results"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-exchange">
+            <h3 style="margin-bottom:8px">Inspect an Exchange mailbox</h3>
+            <p class="form-hint" style="margin-bottom:12px;max-width:72ch">Reads from the server over EWS without changing anything. Leave the password empty to use the Microsoft sign-in. The password is used for this request only. Recoverable Items and the online archive can also be collected: they are listed in Collect, step 4.</p>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="ex-email">Mailbox</label><input type="text" id="ex-email" placeholder="The project's mailbox"></div>
+              <div class="form-group"><label for="ex-password">Password</label><input type="password" id="ex-password" autocomplete="off" data-lpignore="true"></div>
+            </div>
+            <div class="form-group"><label for="ex-url">EWS address (optional)</label><input type="text" id="ex-url" placeholder="Found with Autodiscover if empty" style="max-width:640px"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+              <button class="btn btn-secondary btn-sm" onclick="runExchange('recoverable-items')">Recoverable Items</button>
+              <button class="btn btn-secondary btn-sm" onclick="runExchange('archive')">Online Archive</button>
+              <button class="btn btn-secondary btn-sm" onclick="runExchange('inbox-rules')">Inbox Rules</button>
+              <button class="btn btn-secondary btn-sm" onclick="runExchange('public-folders')">Public Folders</button>
+              <button class="btn btn-secondary btn-sm" onclick="runExchange('version')">Server Version</button>
+              <span id="exchange-status" role="status"></span>
+            </div>
+            <div id="exchange-results"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-cloud">
+            <h3 style="margin-bottom:8px">Calendar, contacts and drive listings</h3>
+            <p class="form-hint" style="margin-bottom:12px;max-width:72ch">Uses the account signed in under Collect, step 1. Reading calendars and contacts needs a permission mail collection does not ask for, so grant it here if the provider refuses. Files themselves are collected in Collect (scope: Drive).</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+              <button class="btn btn-secondary btn-sm" onclick="runCloud('calendar')">Google Calendar</button>
+              <button class="btn btn-secondary btn-sm" onclick="runCloud('google-contacts')">Google Contacts</button>
+              <button class="btn btn-secondary btn-sm" onclick="runCloud('ms-contacts')">Microsoft Contacts</button>
+              <button class="btn btn-secondary btn-sm" onclick="runCloud('google-drive')">List Google Drive</button>
+              <button class="btn btn-secondary btn-sm" onclick="runCloud('onedrive')">List OneDrive</button>
+              <button class="btn btn-secondary btn-sm" onclick="runCloud('sharepoint')">List SharePoint Sites</button>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+              <button class="btn btn-secondary btn-sm" onclick="grantCloudPermission('google', 'calendar,contacts')">Grant Google calendar and contacts</button>
+              <button class="btn btn-secondary btn-sm" onclick="grantCloudPermission('microsoft', 'contacts,sharepoint')">Grant Microsoft contacts and SharePoint</button>
+              <span id="cloud-tool-status" role="status"></span>
+            </div>
+            <div id="cloud-tool-results"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-snapshots">
+            <h3 style="margin-bottom:8px">Folder snapshots</h3>
+            <p class="form-hint" style="margin-bottom:12px;max-width:72ch">The server's folder list and counts, read live. Every collection takes one before and one after by itself. To take one now, enter the connection in Collect, step 1.</p>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+              <button class="btn btn-secondary btn-sm" onclick="takeSnapshot()">Take a snapshot now</button>
+              <button class="btn btn-secondary btn-sm" onclick="compareSnapshots()">Compare the latest two</button>
+              <span id="snapshots-status" role="status"></span>
+            </div>
+            <div id="snapshots-compare"></div>
+            <div id="snapshots-list"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-batch">
+            <h3 style="margin-bottom:8px">Collect several mailboxes</h3>
+            <p class="form-hint" style="margin-bottom:12px;max-width:72ch">Makes one project per mailbox and collects them one after another, using the connection in Collect, step 1. This suits an enterprise sign-in (Other Sign-ins), which reaches every mailbox with one credential; a password can only open one account.</p>
+            <div class="form-group"><label for="batch-emails">Mailboxes, one per line</label><textarea id="batch-emails" rows="4" style="max-width:480px;width:100%"></textarea></div>
+            <div class="form-group"><label for="batch-folders">Folders (comma separated)</label><input type="text" id="batch-folders" value="INBOX" style="max-width:480px"></div>
+            <div class="form-group">
+              <label for="batch-output">Destination folder (one subfolder per mailbox)</label>
+              <div style="display:flex;gap:8px;max-width:640px">
+                <input type="text" id="batch-output" style="flex:1">
+                <button class="btn btn-secondary" type="button" onclick="toolPickFolder('batch-output')">Browse</button>
+              </div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+              <button class="btn btn-primary" onclick="startBatch()">Start</button>
+              <span id="batch-status" role="status"></span>
+            </div>
+            <div id="batch-results"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-reports">
+            <h3 style="margin-bottom:8px">Reports</h3>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+              <button class="btn btn-secondary btn-sm" onclick="runReport('history')">History report</button>
+              <button class="btn btn-secondary btn-sm" onclick="runReport('revisions')">Drive file revisions</button>
+              <button class="btn btn-secondary btn-sm" onclick="runReport('logs')">Archive all logs (ZIP)</button>
+              <span id="reports-status" role="status"></span>
+            </div>
+            <div id="reports-output"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-certificates">
+            <h3 style="margin-bottom:8px">Certificates for S/MIME</h3>
+            <p class="form-hint" style="margin-bottom:12px;max-width:72ch">A certificate alone is trusted as an issuer when checking signatures. With its private key it can decrypt messages for that recipient; the key is stored encrypted. PEM format only: convert a .pfx with <code>openssl pkcs12 -in key.pfx -out key.pem -nodes</code>.</p>
+            <div class="form-group">
+              <label for="cert-pem">Certificate (PEM)</label>
+              <textarea id="cert-pem" rows="3" style="max-width:640px;width:100%;font-family:var(--font-mono);font-size:11px"></textarea>
+              <input type="file" accept=".pem,.crt,.cer" onchange="readPemInto('cert-pem', this)" style="margin-top:4px">
+            </div>
+            <div class="form-group">
+              <label for="cert-key">Private key (PEM, optional)</label>
+              <textarea id="cert-key" rows="3" style="max-width:640px;width:100%;font-family:var(--font-mono);font-size:11px"></textarea>
+              <input type="file" accept=".pem,.key" onchange="readPemInto('cert-key', this)" style="margin-top:4px">
+            </div>
+            <div class="form-group"><label for="cert-pass">Key passphrase (if it has one)</label><input type="password" id="cert-pass" autocomplete="off" data-lpignore="true" style="max-width:320px"></div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:12px">
+              <button class="btn btn-primary" onclick="importCertificate()">Import</button>
+              <span id="cert-status" role="status"></span>
+            </div>
+            <div id="cert-list"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-signins">
+            <h3 style="margin-bottom:8px">Microsoft enterprise sign-in</h3>
+            <p class="form-hint" style="margin-bottom:8px" id="enterprise-current"></p>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="ent-tenant">Tenant ID</label><input type="text" id="ent-tenant"></div>
+              <div class="form-group"><label for="ent-client">Application (client) ID</label><input type="text" id="ent-client"></div>
+            </div>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="ent-secret">Client secret</label><input type="password" id="ent-secret" autocomplete="off" data-lpignore="true"></div>
+              <div class="form-group"><label for="ent-env">Cloud</label>
+                <select id="ent-env"><option value="commercial">Commercial</option><option value="usgov">US Government</option><option value="usgov_dod">US DoD</option><option value="china">China (21Vianet)</option><option value="germany">Germany</option></select>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+              <button class="btn btn-primary btn-sm" onclick="enterpriseSignIn()">Sign in</button>
+              <button class="btn btn-secondary btn-sm" onclick="enterpriseSignOut()">Sign out</button>
+              <span id="enterprise-status" role="status"></span>
+            </div>
+            <div class="form-group"><label for="ent-token">Or paste an access token obtained elsewhere</label><textarea id="ent-token" rows="2" style="max-width:640px;width:100%;font-family:var(--font-mono);font-size:11px"></textarea></div>
+            <div class="form-group"><label for="ent-token-minutes">Valid for (minutes)</label><input type="number" id="ent-token-minutes" value="60" min="1" style="max-width:120px"></div>
+            <button class="btn btn-secondary btn-sm" onclick="enterpriseImportToken()">Use this token</button>
+
+            <h3 style="margin:32px 0 8px">Yahoo sign-in</h3>
+            <p class="form-hint" style="margin-bottom:8px" id="yahoo-current"></p>
+            <p class="form-hint" style="margin-bottom:8px;max-width:72ch">An alternative to an app password. It needs your own Yahoo app (client ID and secret) with mail read access.</p>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="yahoo-client">Client ID</label><input type="text" id="yahoo-client"></div>
+              <div class="form-group"><label for="yahoo-secret">Client secret</label><input type="password" id="yahoo-secret" autocomplete="off" data-lpignore="true"></div>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn btn-secondary btn-sm" onclick="yahooSignIn()">Sign in with Yahoo</button>
+              <span id="yahoo-status" role="status"></span>
+            </div>
+          </div>
+
+          <div class="sub-panel" id="tools-diagnostics">
+            <h3 style="margin-bottom:8px">Diagnostics</h3>
+            <div class="form-row" style="max-width:480px">
+              <div class="form-group"><label for="diag-host">Server</label><input type="text" id="diag-host" placeholder="imap.example.com"></div>
+              <div class="form-group"><label for="diag-port">Port</label><input type="number" id="diag-port" value="993"></div>
+            </div>
+            <div style="margin-bottom:16px"><button class="btn btn-secondary btn-sm" onclick="runConnectivity()">Test the connection</button></div>
+            <div class="form-row" style="max-width:480px">
+              <div class="form-group"><label for="diag-email">E-mail address</label><input type="text" id="diag-email"></div>
+              <div class="form-group"><label for="diag-password">Password (for Autodiscover)</label><input type="password" id="diag-password" autocomplete="off" data-lpignore="true"></div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+              <button class="btn btn-secondary btn-sm" onclick="runServerProfile()">Who handles this domain's mail?</button>
+              <button class="btn btn-secondary btn-sm" onclick="runAutodiscover()">Exchange Autodiscover</button>
+              <button class="btn btn-secondary btn-sm" onclick="runHealth()">Computer health</button>
+              <span id="diag-status" role="status"></span>
+            </div>
+            <div id="diag-results"></div>
+          </div>
+
+          <div class="sub-panel" id="tools-settings">
+            <h3 style="margin-bottom:8px">Proxy</h3>
+            <p class="form-hint" style="margin-bottom:8px" id="proxy-current"></p>
+            <p class="form-hint" style="margin-bottom:8px;max-width:72ch">All mail and API connections go through it. The password is stored encrypted.</p>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="proxy-type">Type</label><select id="proxy-type"><option value="none">None (direct)</option><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></div>
+              <div class="form-group"><label for="proxy-host">Host</label><input type="text" id="proxy-host"></div>
+              <div class="form-group"><label for="proxy-port">Port</label><input type="number" id="proxy-port"></div>
+            </div>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="proxy-user">User (optional)</label><input type="text" id="proxy-user"></div>
+              <div class="form-group"><label for="proxy-pass">Password</label><input type="password" id="proxy-pass" autocomplete="off" data-lpignore="true"></div>
+            </div>
+            <div style="display:flex;gap:12px;align-items:center;margin-bottom:24px">
+              <button class="btn btn-primary btn-sm" onclick="saveProxy()">Save proxy</button>
+              <span id="proxy-status" role="status"></span>
+            </div>
+
+            <h3 style="margin-bottom:8px">E-mail notifications for this project</h3>
+            <p class="form-hint" style="margin-bottom:8px" id="smtp-current"></p>
+            <p class="form-hint" style="margin-bottom:8px;max-width:72ch">An e-mail when a collection finishes or fails. It holds the project name and counts, never message content. The password is stored encrypted.</p>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="smtp-host">SMTP server</label><input type="text" id="smtp-host"></div>
+              <div class="form-group"><label for="smtp-port">Port</label><input type="number" id="smtp-port" value="587"></div>
+              <div class="form-group"><label class="toggle-label" style="margin-top:24px"><input type="checkbox" id="smtp-secure"> TLS from the start (port 465)</label></div>
+            </div>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="smtp-user">User</label><input type="text" id="smtp-user"></div>
+              <div class="form-group"><label for="smtp-pass">Password</label><input type="password" id="smtp-pass" autocomplete="off" data-lpignore="true"></div>
+            </div>
+            <div class="form-row" style="max-width:640px">
+              <div class="form-group"><label for="smtp-from">From</label><input type="text" id="smtp-from"></div>
+              <div class="form-group"><label for="smtp-to">To (comma separated)</label><input type="text" id="smtp-to"></div>
+            </div>
+            <label class="toggle-label" style="margin-bottom:12px;display:block"><input type="checkbox" id="smtp-on-export"> Also when an export finishes</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn btn-secondary btn-sm" onclick="testSmtp()">Send a test</button>
+              <button class="btn btn-primary btn-sm" onclick="saveSmtp()">Save</button>
+              <span id="smtp-status" role="status"></span>
+            </div>
           </div>
         </div>
 
@@ -1441,5 +1753,6 @@
   </div>
 
   <script src="/js/app.js"></script>
+  <script src="/js/tools.js"></script>
 </body>
 </html>

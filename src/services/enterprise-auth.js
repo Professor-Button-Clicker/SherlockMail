@@ -1,6 +1,9 @@
 import crypto from 'crypto';
-import https from 'https';
 import { v4 as uuidv4 } from 'uuid';
+
+// Sessions live in memory only: a client secret or token is never written to disk.
+const sessions = new Map();
+const TOKEN_MARGIN_MS = 60000;
 
 const AZURE_ENVIRONMENTS = {
   commercial: {
@@ -50,77 +53,63 @@ export class EnterpriseAuthService {
     return AZURE_ENVIRONMENTS[env] || AZURE_ENVIRONMENTS.commercial;
   }
 
-  static async authenticateAppOnly(config) {
-    const env = this.getEnvironment(config.azureEnvironment || 'commercial');
-    const tenantId = config.tenantId;
-    const clientId = config.clientId;
-    const clientSecret = config.clientSecret;
+  static getSession(id) {
+    const session = sessions.get(id);
+    if (!session) throw new Error('This enterprise sign-in is no longer active: sign in again');
+    return session;
+  }
 
-    if (!tenantId || !clientId || !clientSecret) {
+  // Signs in now, so wrong details fail here, and returns a session a collection can use by its id.
+  static async authenticateAppOnly(config) {
+    if (!config.tenantId || !config.clientId || !config.clientSecret) {
       throw new Error('App-only authentication requires tenantId, clientId, and clientSecret');
     }
-
-    const tokenUrl = `${env.authority}/${tenantId}/oauth2/v2.0/token`;
-    const body = new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: clientId,
-      client_secret: clientSecret,
-      scope: `${env.resourceId}/.default`,
-    });
-
-    const response = await this._httpsPost(tokenUrl, body.toString());
-    const tokens = JSON.parse(response);
-
-    if (tokens.error) throw new Error(`Auth failed: ${tokens.error_description || tokens.error}`);
-
-    return {
-      accessToken: tokens.access_token,
-      tokenType: tokens.token_type,
-      expiresIn: tokens.expires_in,
-      expiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
-      environment: config.azureEnvironment || 'commercial',
-      graphEndpoint: env.graphEndpoint,
-      ewsEndpoint: env.ewsEndpoint,
-      authMethod: 'app_only',
-    };
+    return this._openSession(config, 'app_only', () => ({
+      client_secret: config.clientSecret,
+    }));
   }
 
   static async authenticateWithCertificate(config) {
-    const env = this.getEnvironment(config.azureEnvironment || 'commercial');
-    const tenantId = config.tenantId;
-    const clientId = config.clientId;
-
-    const assertion = this._buildClientAssertion(clientId, tenantId, config.certificate, config.privateKey, env.authority);
-
-    const tokenUrl = `${env.authority}/${tenantId}/oauth2/v2.0/token`;
-    const body = new URLSearchParams({
-      grant_type: 'client_credentials',
-      client_id: clientId,
+    if (!config.tenantId || !config.clientId || !config.certificate || !config.privateKey) {
+      throw new Error('Certificate authentication requires tenantId, clientId, certificate and privateKey');
+    }
+    const envName = config.azureEnvironment || 'commercial';
+    const env = this.getEnvironment(envName);
+    return this._openSession(config, 'certificate', () => ({
       client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-      client_assertion: assertion,
-      scope: `${env.resourceId}/.default`,
-    });
+      client_assertion: this._buildClientAssertion(config.clientId, config.tenantId, config.certificate, config.privateKey, env.authority),
+    }));
+  }
 
-    const response = await this._httpsPost(tokenUrl, body.toString());
-    const tokens = JSON.parse(response);
-
-    if (tokens.error) throw new Error(`Certificate auth failed: ${tokens.error_description || tokens.error}`);
-
-    return {
-      accessToken: tokens.access_token,
-      tokenType: tokens.token_type,
-      expiresIn: tokens.expires_in,
-      expiresAt: new Date(Date.now() + tokens.expires_in * 1000).toISOString(),
-      environment: config.azureEnvironment || 'commercial',
-      graphEndpoint: env.graphEndpoint,
-      ewsEndpoint: env.ewsEndpoint,
-      authMethod: 'certificate',
+  static async _openSession(config, authMethod, credentialFields) {
+    const envName = config.azureEnvironment || 'commercial';
+    const env = this.getEnvironment(envName);
+    const authority = process.env.SHERLOCKMAIL_AZURE_AUTHORITY || env.authority;
+    const tokens = new Map();
+    const tokenFor = async (resource, { force } = {}) => {
+      const cached = tokens.get(resource);
+      if (cached && !force && cached.expiresAt - TOKEN_MARGIN_MS > Date.now()) return cached.token;
+      const res = await fetch(`${authority}/${encodeURIComponent(config.tenantId)}/oauth2/v2.0/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ grant_type: 'client_credentials', client_id: config.clientId, scope: `${resource}/.default`, ...credentialFields() }).toString(),
+        signal: AbortSignal.timeout(30000),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body.error || !body.access_token) throw new Error(`Sign-in failed: ${body.error_description || body.error || `HTTP ${res.status}`}`);
+      tokens.set(resource, { token: body.access_token, expiresAt: Date.now() + (body.expires_in || 3600) * 1000 });
+      return body.access_token;
     };
+    const graphEndpoint = process.env.SHERLOCKMAIL_GRAPH_URL ? process.env.SHERLOCKMAIL_GRAPH_URL.replace(/\/v1\.0$/, '') : env.graphEndpoint;
+    await tokenFor(graphEndpoint);
+    const id = uuidv4();
+    sessions.set(id, { id, authMethod, environment: envName, graphEndpoint, graphBase: `${graphEndpoint}/v1.0`, ewsEndpoint: env.ewsEndpoint, tokenFor });
+    return { sessionId: id, authMethod, environment: envName, environmentName: env.name, graphEndpoint, ewsEndpoint: env.ewsEndpoint, expiresAt: new Date(tokens.get(graphEndpoint).expiresAt).toISOString() };
   }
 
   static _buildClientAssertion(clientId, tenantId, certificate, privateKey, authority) {
     const now = Math.floor(Date.now() / 1000);
-    const thumbprint = crypto.createHash('sha1').update(Buffer.from(certificate.replace(/-----.*-----/g, '').replace(/\s/g, ''), 'base64')).digest('base64url');
+    const thumbprint = crypto.createHash('sha1').update(new crypto.X509Certificate(certificate).raw).digest('base64url');
 
     const header = Buffer.from(JSON.stringify({
       alg: 'RS256', typ: 'JWT',
@@ -142,37 +131,21 @@ export class EnterpriseAuthService {
     return `${signable}.${signature}`;
   }
 
-  static async importToken(tokenData) {
+  // A Microsoft token obtained elsewhere (for example on the custodian's own device), usable until it expires.
+  static importToken(tokenData) {
     const token = typeof tokenData === 'string' ? JSON.parse(tokenData) : tokenData;
-    const required = ['access_token'];
-    for (const field of required) {
-      if (!token[field]) throw new Error(`Missing required field: ${field}`);
-    }
-
-    return {
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token || null,
-      tokenType: token.token_type || 'Bearer',
-      expiresAt: token.expires_at || (token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : null),
-      scope: token.scope || null,
-      imported: true,
-      importedAt: new Date().toISOString(),
+    if (!token.access_token) throw new Error('Missing required field: access_token');
+    const expiresAt = token.expires_at ? new Date(token.expires_at).getTime() : (token.expires_in ? Date.now() + token.expires_in * 1000 : null);
+    if (expiresAt && expiresAt <= Date.now()) throw new Error('This token has already expired');
+    const envName = token.azureEnvironment || 'commercial';
+    const env = this.getEnvironment(envName);
+    const graphEndpoint = process.env.SHERLOCKMAIL_GRAPH_URL ? process.env.SHERLOCKMAIL_GRAPH_URL.replace(/\/v1\.0$/, '') : env.graphEndpoint;
+    const id = uuidv4();
+    const tokenFor = async () => {
+      if (expiresAt && expiresAt <= Date.now()) throw new Error('The imported token has expired: import a new one');
+      return token.access_token;
     };
-  }
-
-  static _httpsPost(url, body) {
-    return new Promise((resolve, reject) => {
-      const parsed = new URL(url);
-      const req = https.request({
-        hostname: parsed.hostname, port: 443, path: parsed.pathname + (parsed.search || ''),
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(body) },
-      }, (res) => {
-        const chunks = []; res.on('data', c => chunks.push(c));
-        res.on('end', () => resolve(Buffer.concat(chunks).toString()));
-      });
-      req.on('error', reject);
-      req.write(body); req.end();
-    });
+    sessions.set(id, { id, authMethod: 'imported', environment: envName, graphEndpoint, graphBase: `${graphEndpoint}/v1.0`, ewsEndpoint: env.ewsEndpoint, tokenFor });
+    return { sessionId: id, authMethod: 'imported', environment: envName, scope: token.scope || null, expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null, importedAt: new Date().toISOString() };
   }
 }

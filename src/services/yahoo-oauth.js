@@ -9,9 +9,10 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
 const CREDS_PATH = path.join(DATA_DIR, 'yahoo-oauth.json');
+const TOKENS_PATH = path.join(DATA_DIR, 'yahoo-tokens.json');
 
 const YAHOO_AUTH_URL = 'https://api.login.yahoo.com/oauth2/request_auth';
-const YAHOO_TOKEN_URL = 'https://api.login.yahoo.com/oauth2/get_token';
+const YAHOO_TOKEN_URL = process.env.SHERLOCKMAIL_YAHOO_TOKEN_URL || 'https://api.login.yahoo.com/oauth2/get_token';
 const REDIRECT_URI = 'http://localhost:8891/yahoo/callback';
 const SCOPES = 'mail-r openid';
 
@@ -34,10 +35,18 @@ export function saveCredentials(creds) {
 }
 
 export function loadCredentials() {
-  if (state.credentials) return;
-  try {
-    state.credentials = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8'));
-  } catch {}
+  if (!state.credentials) {
+    try { state.credentials = JSON.parse(fs.readFileSync(CREDS_PATH, 'utf8')); } catch { /* not configured yet */ }
+  }
+  if (!state.tokens) {
+    try { state.tokens = JSON.parse(fs.readFileSync(TOKENS_PATH, 'utf8')); } catch { /* not signed in yet */ }
+  }
+}
+
+function saveTokens(tokens) {
+  state.tokens = tokens;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(TOKENS_PATH, JSON.stringify(tokens, null, 2));
 }
 
 export function getAuthUrl() {
@@ -61,9 +70,13 @@ export function startCallbackServer() {
     state.callbackServer = http.createServer((req, res) => {
       const url = new URL(req.url, `http://localhost:8891`);
       if (url.pathname === '/yahoo/callback') {
-        state.authCode = url.searchParams.get('code');
         res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end('<html><body><h2>Yahoo Authentication Successful</h2><p>You can close this window.</p></body></html>');
+        if (url.searchParams.get('state') !== state.csrfState || !url.searchParams.get('code')) {
+          res.end('<html><body><h2>Yahoo sign-in failed</h2><p>The response did not match this sign-in. Close this window and try again.</p></body></html>');
+          return;
+        }
+        state.authCode = url.searchParams.get('code');
+        res.end('<html><body><h2>Yahoo sign-in finished</h2><p>You can close this window and return to SherlockMail.</p></body></html>');
       } else {
         res.writeHead(404); res.end();
       }
@@ -80,9 +93,9 @@ export async function waitForAuth() {
   }
   if (!state.authCode) throw new Error('Authentication timeout');
   const tokens = await exchangeCode(state.authCode);
-  state.tokens = tokens;
+  saveTokens(tokens);
   state.authCode = null;
-  return { success: true, email: tokens.email };
+  return { success: true, email: tokens.email || null };
 }
 
 export function stopCallbackServer() {
@@ -100,6 +113,7 @@ async function exchangeCode(code) {
 
   const data = await httpPost(YAHOO_TOKEN_URL, params.toString(), 'application/x-www-form-urlencoded');
   const tokens = JSON.parse(data);
+  if (tokens.error || !tokens.access_token) throw new Error(`Yahoo sign-in failed: ${tokens.error_description || tokens.error || 'no token returned'}`);
   tokens.expires_at = new Date(Date.now() + (tokens.expires_in || 3600) * 1000).toISOString();
   return tokens;
 }
@@ -114,16 +128,21 @@ export async function refreshTokens() {
   });
   const data = await httpPost(YAHOO_TOKEN_URL, params.toString(), 'application/x-www-form-urlencoded');
   const newTokens = JSON.parse(data);
-  state.tokens = { ...state.tokens, ...newTokens, expires_at: new Date(Date.now() + (newTokens.expires_in || 3600) * 1000).toISOString() };
+  if (newTokens.error || !newTokens.access_token) throw new Error(`Yahoo sign-in could not be renewed: ${newTokens.error_description || newTokens.error}`);
+  saveTokens({ ...state.tokens, ...newTokens, expires_at: new Date(Date.now() + (newTokens.expires_in || 3600) * 1000).toISOString() });
   return state.tokens;
 }
 
-export function getAccessToken() {
-  return state.tokens?.access_token || null;
+export async function getAccessToken() {
+  loadCredentials();
+  if (!state.tokens?.access_token) throw new Error('Yahoo account not signed in. Sign in with Yahoo first.');
+  if (new Date(state.tokens.expires_at).getTime() - 60000 < Date.now()) await refreshTokens();
+  return state.tokens.access_token;
 }
 
 export function revokeTokens() {
   state.tokens = null;
+  try { fs.unlinkSync(TOKENS_PATH); } catch { /* already gone */ }
   return { success: true };
 }
 

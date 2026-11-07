@@ -4,6 +4,12 @@ import { v4 as uuidv4 } from 'uuid';
 const DEFAULT_EWS_URL = 'https://outlook.office365.com/EWS/Exchange.asmx';
 const REQUEST_TIMEOUT_MS = 120000;
 const AUTODISCOVER_TIMEOUT_MS = 30000;
+// Folders outside the normal tree that a forensic collection must be able to reach.
+const SPECIAL_FOLDERS = {
+  'Recoverable Items/Deletions': 'recoverableitemsdeletions',
+  'Recoverable Items/Purges': 'recoverableitemspurges',
+  'Recoverable Items/Versions': 'recoverableitemsversions',
+};
 
 export class EwsHandler {
   constructor(config) {
@@ -125,6 +131,9 @@ export class EwsHandler {
 
     const text = await res.text();
 
+    const version = text.match(/ServerVersionInfo\b[^>]*MajorVersion="(\d+)"[^>]*MinorVersion="(\d+)"[^>]*MajorBuildNumber="(\d+)"[^>]*MinorBuildNumber="(\d+)"/);
+    if (version) this.serverVersion = version.slice(1, 5).join('.');
+
     if (!res.ok || /ResponseCode>ErrorServerBusy</.test(text)) {
       const faultMatch = text.match(/<faultstring>(.*?)<\/faultstring>/s);
       const err = new Error(faultMatch ? faultMatch[1] : `EWS request failed (${res.status})`);
@@ -135,6 +144,18 @@ export class EwsHandler {
     }
 
     this.log('S→C', `HTTP ${res.status} - ${operation} response received`);
+
+    // EWS reports most failures with HTTP 200 and ResponseClass="Error". Reading such a response as an empty
+    // result would turn "access denied" into "no items". GetItem batches report per item, in fetchBatch.
+    if (operation !== 'GetItem' && /ResponseClass="Error"/.test(text)) {
+      const code = text.match(/<m:ResponseCode>([^<]+)</)?.[1] || 'EWS error';
+      const detail = text.match(/<m:MessageText>([^<]+)</)?.[1];
+      const err = new Error(detail && detail !== code ? `${code}: ${detail}` : code);
+      err.ewsCode = code;
+      err.permanent = true;
+      this.log('S→C', `${operation} failed: ${code}`);
+      throw err;
+    }
     return text;
   }
 
@@ -147,6 +168,7 @@ export class EwsHandler {
     }
     const id = this.folderIds.get(folder);
     if (id) return `<t:FolderId Id="${this.escapeXml(id)}"/>`;
+    if (SPECIAL_FOLDERS[folder]) return `<t:DistinguishedFolderId Id="${SPECIAL_FOLDERS[folder]}"/>`;
     const wellKnown = this.mapWellKnownFolder(folder, null);
     if (wellKnown) return `<t:DistinguishedFolderId Id="${wellKnown}"/>`;
     if (/^[A-Za-z0-9+/=_-]{40,}$/.test(folder)) return `<t:FolderId Id="${this.escapeXml(folder)}"/>`;
@@ -295,7 +317,82 @@ export class EwsHandler {
     }
 
     this.log('S→C', `FindFolder returned ${folders.length} folders`);
-    return folders;
+    return [...folders, ...await this.listSpecialFolders()];
+  }
+
+  // Recoverable Items and the online archive are not under msgfolderroot. A mailbox without them, or an
+  // account without the right, simply does not list them; the reason is in the protocol log.
+  async listSpecialFolders() {
+    const out = [];
+    for (const [path, distinguished] of Object.entries(SPECIAL_FOLDERS)) {
+      try {
+        const xml = await this.soapRequest('GetFolder', `<m:GetFolder>
+          <m:FolderShape><t:BaseShape>Default</t:BaseShape></m:FolderShape>
+          <m:FolderIds><t:DistinguishedFolderId Id="${distinguished}"/></m:FolderIds>
+        </m:GetFolder>`);
+        out.push({
+          id: uuidv4(), path, name: path.split('/').pop(), parentPath: 'Recoverable Items', specialFolder: true,
+          totalMessages: parseInt(this.extractXmlText(xml, 't:TotalCount') || '0', 10), unseenMessages: 0,
+        });
+      } catch (err) {
+        this.log('CLIENT', `${path} is not available: ${err.message}`);
+      }
+    }
+    try {
+      for (const f of await this.listFoldersUnder('archivemsgfolderroot')) out.push({ ...f, path: `Online Archive/${f.name}`, parentPath: 'Online Archive', specialFolder: true });
+    } catch (err) {
+      this.log('CLIENT', `Online archive is not available: ${err.message}`);
+    }
+    return out;
+  }
+
+  async listFoldersUnder(distinguishedId) {
+    const xml = await this.soapRequest('FindFolder', `<m:FindFolder Traversal="Deep">
+      <m:FolderShape><t:BaseShape>Default</t:BaseShape></m:FolderShape>
+      <m:IndexedPageFolderView MaxEntriesReturned="1000" Offset="0" BasePoint="Beginning"/>
+      <m:ParentFolderIds><t:DistinguishedFolderId Id="${distinguishedId}"/></m:ParentFolderIds>
+    </m:FindFolder>`);
+    return this.parseFolders(xml);
+  }
+
+  // Items of a folder with what an examiner needs to judge them, without downloading any message.
+  async listItemSummaries(folder, { limit = 1000 } = {}) {
+    const folderRef = await this.resolveFolderRef(folder);
+    const xml = await this.soapRequest('FindItem', `<m:FindItem Traversal="Shallow">
+      <m:ItemShape>
+        <t:BaseShape>IdOnly</t:BaseShape>
+        <t:AdditionalProperties>
+          <t:FieldURI FieldURI="item:Subject"/><t:FieldURI FieldURI="item:Size"/><t:FieldURI FieldURI="item:DateTimeReceived"/>
+          <t:FieldURI FieldURI="message:From"/>
+        </t:AdditionalProperties>
+      </m:ItemShape>
+      <m:IndexedPageItemView MaxEntriesReturned="${limit}" Offset="0" BasePoint="Beginning"/>
+      <m:ParentFolderIds>${folderRef}</m:ParentFolderIds>
+    </m:FindItem>`);
+    const total = parseInt(xml.match(/TotalItemsInView="(\d+)"/)?.[1] || '0', 10);
+    const items = this.parseItemStubs(xml).map(i => ({ id: i.itemId, subject: i.subject, from: i.from, received: i.dateReceived, size: i.size }));
+    return { total, items };
+  }
+
+  async getInboxRules(mailbox) {
+    const xml = await this.soapRequest('GetInboxRules', `<m:GetInboxRules><m:MailboxSmtpAddress>${this.escapeXml(mailbox)}</m:MailboxSmtpAddress></m:GetInboxRules>`);
+    const rules = [];
+    for (const m of xml.matchAll(/<t:Rule>([\s\S]*?)<\/t:Rule>/g)) {
+      const actionsBlock = this.extractXmlText(m[1], 't:Actions') || '';
+      const actions = [];
+      for (const a of actionsBlock.matchAll(/<t:(\w+)(?:\s[^>]*)?(?:\/>|>([\s\S]*?)<\/t:\1>)/g)) {
+        const targets = [...(a[2] || '').matchAll(/<t:EmailAddress>([^<]+)</g)].map(t => t[1]);
+        actions.push({ type: a[1], targets });
+      }
+      rules.push({
+        id: this.extractXmlText(m[1], 't:RuleId'),
+        name: this.extractXmlText(m[1], 't:DisplayName'),
+        priority: parseInt(this.extractXmlText(m[1], 't:Priority') || '0', 10),
+        enabled: this.extractXmlText(m[1], 't:IsEnabled') === 'true',
+        actions,
+      });
+    }
+    return rules;
   }
 
   parseFolders(xml) {

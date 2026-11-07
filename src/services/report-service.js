@@ -1,8 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import zlib from 'zlib';
-import { v4 as uuidv4 } from 'uuid';
+import { ContainerService } from './container-service.js';
 
 export class ReportService {
 
@@ -106,6 +105,18 @@ export class ReportService {
     report += `Total Files Tracked: ${driveItems.length}\n`;
     report += `Total Revisions:     ${revisions.length}\n\n`;
 
+    if (options.notAvailable?.length) {
+      report += `${sep}\nFILES WHOSE REVISIONS COULD NOT BE READ\n${thin}\n\n`;
+      for (const n of options.notAvailable) report += `${n.name}: ${n.error}\n`;
+      report += `\n`;
+    }
+
+    if (options.notAvailable?.length) {
+      report += `${sep}\nFILES WHOSE REVISIONS COULD NOT BE READ\n${thin}\n\n`;
+      for (const n of options.notAvailable) report += `${n.name}: ${n.error}\n`;
+      report += `\n`;
+    }
+
     const itemMap = new Map();
     for (const item of driveItems) itemMap.set(item.id, item);
 
@@ -151,105 +162,26 @@ export class ReportService {
 
   // ── Log Compression (Feature 20) ──
 
-  static async compressLogs(projectId, logsDir, outputPath) {
-    const files = [];
-    if (fs.existsSync(logsDir)) {
-      const walk = (dir) => {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          const full = path.join(dir, entry.name);
-          if (entry.isDirectory()) walk(full);
-          else if (entry.name.endsWith('.log') || entry.name.endsWith('.txt') || entry.name.endsWith('.json')) {
-            files.push(full);
-          }
-        }
-      };
-      walk(logsDir);
-    }
-
-    if (files.length === 0) return { compressed: false, reason: 'No log files found' };
-
-    const parts = [];
+  // sources: [{ dir, prefix }]. Every file in those folders goes into the archive; a log of any type counts.
+  static compressLogs(projectId, sources, outputPath) {
     const entries = [];
-    let offset = 0;
-
-    for (const filePath of files) {
-      const relPath = path.relative(logsDir, filePath);
-      const content = fs.readFileSync(filePath);
-      const crc = this._crc32(content);
-      const compressed = zlib.deflateRawSync(content, { level: 6 });
-
-      const nameBytes = Buffer.from(relPath, 'utf8');
-      const now = new Date();
-      const dosTime = ((now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1)) & 0xFFFF;
-      const dosDate = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xFFFF;
-
-      const header = Buffer.alloc(30);
-      header.writeUInt32LE(0x04034B50, 0);
-      header.writeUInt16LE(20, 4);
-      header.writeUInt16LE(0x0800, 6); // UTF-8 flag
-      header.writeUInt16LE(8, 8); // Deflate
-      header.writeUInt16LE(dosTime, 10);
-      header.writeUInt16LE(dosDate, 12);
-      header.writeUInt32LE(crc, 14);
-      header.writeUInt32LE(compressed.length, 18);
-      header.writeUInt32LE(content.length, 22);
-      header.writeUInt16LE(nameBytes.length, 26);
-
-      entries.push({ offset, name: nameBytes, crc, compressedSize: compressed.length, uncompressedSize: content.length, dosTime, dosDate });
-      parts.push(header, nameBytes, compressed);
-      offset += 30 + nameBytes.length + compressed.length;
+    for (const { dir, prefix } of sources) {
+      if (!fs.existsSync(dir)) continue;
+      for (const file of ContainerService.collectFiles(dir)) {
+        entries.push({ path: file.path, name: path.posix.join(prefix, path.relative(dir, file.path).replace(/\\/g, '/')) });
+      }
     }
-
-    const cdStart = offset;
-    for (const entry of entries) {
-      const cd = Buffer.alloc(46);
-      cd.writeUInt32LE(0x02014B50, 0);
-      cd.writeUInt16LE(0x033F, 4);
-      cd.writeUInt16LE(20, 6);
-      cd.writeUInt16LE(0x0800, 8);
-      cd.writeUInt16LE(8, 10); // Deflate
-      cd.writeUInt16LE(entry.dosTime, 12);
-      cd.writeUInt16LE(entry.dosDate, 14);
-      cd.writeUInt32LE(entry.crc, 16);
-      cd.writeUInt32LE(entry.compressedSize, 20);
-      cd.writeUInt32LE(entry.uncompressedSize, 24);
-      cd.writeUInt16LE(entry.name.length, 28);
-      cd.writeUInt32LE(entry.offset, 42);
-      parts.push(Buffer.concat([cd, entry.name]));
-      offset += 46 + entry.name.length;
-    }
-
-    const eocd = Buffer.alloc(22);
-    eocd.writeUInt32LE(0x06054B50, 0);
-    eocd.writeUInt16LE(entries.length, 8);
-    eocd.writeUInt16LE(entries.length, 10);
-    eocd.writeUInt32LE(offset - cdStart, 12);
-    eocd.writeUInt32LE(cdStart, 16);
-    parts.push(eocd);
-
-    const archive = Buffer.concat(parts);
-    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-    fs.writeFileSync(outputPath, archive);
-
-    const totalUncompressed = entries.reduce((s, e) => s + e.uncompressedSize, 0);
+    if (entries.length === 0) return { compressed: false, reason: 'This project has no log files yet' };
+    const zip = ContainerService.writeZip(entries, outputPath);
     return {
       compressed: true,
       outputPath,
-      size: archive.length,
-      fileCount: files.length,
-      totalUncompressed,
-      compressionRatio: totalUncompressed > 0 ? ((1 - archive.length / totalUncompressed) * 100).toFixed(1) + '%' : '0%',
-      hash: crypto.createHash('sha256').update(archive).digest('hex'),
+      size: zip.size,
+      fileCount: zip.fileCount,
+      totalUncompressed: zip.totalOriginalSize,
+      compressionRatio: zip.compressionRatio,
+      hash: zip.hashes.sha256,
       format: 'ZIP (deflate)',
     };
-  }
-
-  static _crc32(data) {
-    let crc = 0xFFFFFFFF;
-    for (let i = 0; i < data.length; i++) {
-      crc ^= data[i];
-      for (let j = 0; j < 8; j++) crc = (crc >>> 1) ^ (crc & 1 ? 0xEDB88320 : 0);
-    }
-    return (crc ^ 0xFFFFFFFF) >>> 0;
   }
 }

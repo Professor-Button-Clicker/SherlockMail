@@ -1,11 +1,13 @@
 import net from 'net';
 import tls from 'tls';
 import { buildMessageRecord } from '../services/collection-engine.js';
+import { connectThroughProxy } from '../util/proxy.js';
 
 const CRLF = Buffer.from('\r\n');
 const TERMINATOR = Buffer.from('\r\n.\r\n');
 const MAX_LOG_ENTRIES = 5000;
 const IDLE_TIMEOUT_MS = 120000;
+const LOCAL_HOST = /^(localhost|127\.\d+\.\d+\.\d+|::1)$/;
 
 // RFC 1939 byte-stuffing: the server prefixes every line starting with "." with another ".".
 function unstuff(buf) {
@@ -116,14 +118,18 @@ export class Pop3Handler {
     this.pending = [];
     this.start = 0;
     this.len = 0;
+    const tunnel = await connectThroughProxy(host, connectPort);
+    // Credentials only go to a server whose certificate verifies; a bridge on this computer is self-signed.
+    const tlsOptions = { host, servername: net.isIP(host) ? undefined : host, rejectUnauthorized: !LOCAL_HOST.test(host) };
     this.socket = secure
-      ? tls.connect({ host, port: connectPort, rejectUnauthorized: false })
-      : net.createConnection({ host, port: connectPort });
+      ? tls.connect(tunnel ? { ...tlsOptions, socket: tunnel } : { ...tlsOptions, port: connectPort })
+      : tunnel || net.createConnection({ host, port: connectPort });
     const socket = this.socket;
     socket.setTimeout(IDLE_TIMEOUT_MS, () => socket.destroy(new Error(`POP3 idle timeout after ${IDLE_TIMEOUT_MS / 1000}s`)));
     socket.on('data', (chunk) => { if (this.socket === socket) { this.append(chunk); this.drain(); } });
     socket.on('error', (err) => { if (this.socket === socket) this.failAll(err); });
     socket.on('close', () => { if (this.socket === socket) this.failAll(new Error('POP3 connection closed')); });
+    if (tunnel && !secure) tunnel.resume();
 
     try {
       return await this.handshake();
