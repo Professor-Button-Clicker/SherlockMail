@@ -239,7 +239,7 @@ SherlockMail uses a tab-based interface:
 - **Backend**: Express.js REST API running locally
 - **Database**: Node.js built-in SQLite (`node:sqlite`, DatabaseSync) with WAL mode
 - **All data stored locally** in the `data/` directory. Besides the configured mail server, the only outside contact is a hash sent to a Timestamp Authority (see above), plus a notification e-mail or proxy if you set those up
-- **Command line**: `node server.js <status|collect|import|search|qc|verify|export|timestamp> ...` prints JSON and exits non-zero when the evidence or the operation has a problem. Run `node server.js --help`
+- **Command line**: `node server.js <status|collect|import|search|qc|verify|export|timestamp> ...` prints JSON and exits non-zero when the evidence or the operation has a problem. Run `node server.js --help`. The installed app takes the same commands; Windows only shows a desktop app's output when it is redirected, so use `SherlockMail.exe status > status.json`
 
 ---
 

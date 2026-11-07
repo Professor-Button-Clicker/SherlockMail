@@ -4,8 +4,13 @@ import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
 import express from 'express';
 import { detectRedirectedAppData } from './src/util/appdata-redirect.js';
+import { CLI_COMMAND_NAMES, runCli } from './src/cli.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// "SherlockMail.exe qc --project <id>" and the like: no window, only JSON on stdout, and the exit code says how it went.
+const cliArgs = process.argv.slice(app.isPackaged ? 1 : 2);
+const isCliCommand = CLI_COMMAND_NAMES.includes(cliArgs[0]);
 
 let mainWindow;
 let server;
@@ -97,7 +102,7 @@ async function startServer() {
 
     server = expressApp.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      console.log(`SherlockMail server running on port ${port}`);
+      if (!isCliCommand) console.log(`SherlockMail server running on port ${port}`);
       resolve(port);
     });
   });
@@ -164,10 +169,7 @@ app.whenReady().then(async () => {
   }
   const port = await startServer();
 
-  // "SherlockMail.exe qc --project <id>" and the like: no window, JSON on stdout, the exit code says how it went.
-  const { CLI_COMMAND_NAMES, runCli } = await import('./src/cli.js');
-  const cliArgs = process.argv.slice(app.isPackaged ? 1 : 2);
-  if (CLI_COMMAND_NAMES.includes(cliArgs[0])) {
+  if (isCliCommand) {
     let code = 1;
     try {
       code = await runCli(`http://127.0.0.1:${port}`, cliArgs);
