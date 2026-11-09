@@ -1140,6 +1140,10 @@ async function runCombinedQC() {
         </div>`;
       const flagged = check.mismatches || check.unverifiable;
       if (flagged?.length) html += renderQCFlaggedMessages(flagged);
+      if (check.metrics?.notChecked) {
+        html += `<div style="margin:8px 0 12px"><button class="btn btn-secondary btn-sm" onclick="checkOlderRecords()">Check older records</button>
+          <p class="form-hint" style="margin-top:6px">Reads this case's collected files without changing them, corrects the signed, encrypted and date records an earlier version got wrong, and writes every change to the audit log under this case's examiner.</p></div>`;
+      }
     }
     html += '</div>';
   }
@@ -1156,6 +1160,19 @@ async function runCombinedQC() {
   resultsEl.innerHTML = html;
   statusEl.innerHTML = `<span style="color:${statusColor}">${statusText}</span>`;
   refreshCaseTag();
+}
+
+async function checkOlderRecords() {
+  if (!currentProject) return;
+  const statusEl = document.getElementById('combined-qc-status');
+  statusEl.innerHTML = '<span style="color:var(--accent)">Reading the collected files…</span>';
+  try {
+    const r = await api(`/projects/${currentProject.id}/older-records/check`, { method: 'POST' });
+    toast(`${r.checked} checked, ${r.corrected} corrected, ${r.notChecked} could not be checked. The audit log has the details.`);
+    await runCombinedQC();
+  } catch (e) {
+    statusEl.innerHTML = `<span class="verify-fail">${esc(e.message)}</span>`;
+  }
 }
 
 // ============================================================

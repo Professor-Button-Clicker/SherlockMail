@@ -101,6 +101,8 @@ The Quality check screen runs these checks and reports what it actually found:
 17. **Export Integrity** — Every file each export's manifest lists is re-hashed
 18. **Collection Resumability** — Interrupted acquisitions flagged, with how to complete them
 
+**Cases from before v0.10.0.** Earlier versions did not record signing or encryption, and could give a message with no date the time of collection. Opening one of these cases changes nothing: it shows "Not checked" until the examiner runs **Check older records** on the Quality check screen. That reads the collected files without changing them, corrects the records, and writes every change to the case's audit log.
+
 ### 5. Export
 
 Export collected evidence to any combination of 8 formats:

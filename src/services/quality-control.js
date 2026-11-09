@@ -400,9 +400,10 @@ export class QualityControlService {
 
   static checkEncryptionDetection(messages) {
     const check = { name: 'Encryption & Signing Detection', category: 'security' };
-    let encrypted = 0, signed = 0, smimeDetected = 0;
+    let encrypted = 0, signed = 0, smimeDetected = 0, notChecked = 0;
 
     for (const m of messages) {
+      if (m.protection_unchecked) notChecked++;
       if (m.is_encrypted) encrypted++;
       if (m.is_signed) signed++;
       const ct = m.content_type || m.contentType || '';
@@ -410,11 +411,15 @@ export class QualityControlService {
       if (ct.includes('pkcs7') || ct.includes('smime') || body.includes('BEGIN PKCS7')) smimeDetected++;
     }
 
-    check.metrics = { encrypted, signed, smimeDetected, total: messages.length };
-    check.status = encrypted > 0 ? 'warning' : 'pass';
+    check.metrics = { encrypted, signed, smimeDetected, notChecked, total: messages.length };
+    check.status = encrypted > 0 || notChecked > 0 ? 'warning' : 'pass';
     check.detail = encrypted > 0
       ? `${encrypted} encrypted, ${signed} signed message(s). Encrypted messages are preserved as received; their content cannot be read or searched until decrypted`
       : `${signed} signed message(s) detected, no encrypted messages`;
+    if (notChecked > 0) {
+      const among = notChecked < messages.length ? ` Among the others: ${check.detail}` : '';
+      check.detail = `${notChecked} of ${messages.length} message(s) collected by an earlier version have not been checked for signing or encryption. Use Check older records on the Quality check screen: the collected files are only read, and one that is missing or no longer matches its hash stays not checked.${among}`;
+    }
     return check;
   }
 

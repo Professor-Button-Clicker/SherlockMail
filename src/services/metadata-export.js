@@ -37,8 +37,8 @@ const EMAIL_COLUMNS = [
   { header: 'HashMD5', accessor: r => r.hash_md5 || r.hashMd5 || '' },
   { header: 'BodyPreview', accessor: r => (r.body_text || '').slice(0, 200) },
   { header: 'ContentType', accessor: r => r.content_type || r.contentType || '' },
-  { header: 'Encrypted', accessor: r => r.is_encrypted ? 'Yes' : 'No' },
-  { header: 'Signed', accessor: r => r.is_signed ? 'Yes' : 'No' },
+  { header: 'Encrypted', accessor: r => r.protection_unchecked ? 'Not checked' : (r.is_encrypted ? 'Yes' : 'No') },
+  { header: 'Signed', accessor: r => r.protection_unchecked ? 'Not checked' : (r.is_signed ? 'Yes' : 'No') },
   { header: 'InternetHeaders', accessor: r => r.headers_json || '' },
 ];
 

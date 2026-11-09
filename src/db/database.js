@@ -67,6 +67,12 @@ function migrate() {
   addCol('acquisitions', 'scope', 'TEXT');
   addCol('acquisitions', 'output_dir', 'TEXT');
   addCol('acquisitions', 'protocol', 'TEXT');
+  // Before 0.10.0 signing and encryption were never worked out, so a stored "no" only meant nobody had looked.
+  // Nothing clears this until the examiner runs the check in record-corrections.js; until then the app says "not checked".
+  if (!cols('messages').has('protection_unchecked')) {
+    db.exec('ALTER TABLE messages ADD COLUMN protection_unchecked INTEGER DEFAULT 0');
+    db.exec('UPDATE messages SET protection_unchecked = 1');
+  }
 }
 
 // A collection runs inside this process, so after a restart any acquisition still marked running was
@@ -483,6 +489,26 @@ export function deleteSmtpSettings(projectId) {
 
 export function getMessage(id) {
   return getDb().prepare('SELECT * FROM messages WHERE id = ?').get(id);
+}
+
+export function getUncheckedMessages(projectId, afterRowid, limit) {
+  return getDb().prepare(`SELECT rowid, id, eml_path, date, internal_date, acquired_at, hash_sha256, is_encrypted, is_signed
+    FROM messages WHERE project_id = ? AND protection_unchecked = 1 AND rowid > ? ORDER BY rowid LIMIT ?`).all(projectId, afterRowid, limit);
+}
+
+// All or nothing, so a record never changes without its audit entry.
+export function saveRecordCorrections(updates, audit) {
+  const d = getDb();
+  const update = d.prepare('UPDATE messages SET is_encrypted = ?, is_signed = ?, date = ?, protection_unchecked = 0 WHERE id = ?');
+  d.exec('BEGIN');
+  try {
+    for (const u of updates) update.run(u.isEncrypted ? 1 : 0, u.isSigned ? 1 : 0, u.date, u.id);
+    if (audit) addAuditEntry(audit.projectId, 'RECORDS_CORRECTED', audit.description, audit.details, audit.examiner);
+    d.exec('COMMIT');
+  } catch (err) {
+    d.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 export function getAllProjectMessages(projectId) {

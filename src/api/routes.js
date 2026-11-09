@@ -76,6 +76,7 @@ import { ContainerService } from '../services/container-service.js';
 import { ReportService } from '../services/report-service.js';
 import { computeDifferentialPlan } from '../services/advanced-search.js';
 import { AutomationService } from '../services/automation-service.js';
+import { checkOlderRecords } from '../services/record-corrections.js';
 import { CryptoService } from '../services/crypto-service.js';
 import { FileTypeDetector } from '../services/file-detection.js';
 import { MetadataExportService } from '../services/metadata-export.js';
@@ -2087,6 +2088,18 @@ router.post('/projects/:id/search', async (req, res) => {
     })),
     localResultCount: dbResults.length,
   });
+});
+
+// ── Records from before 0.10.0: corrected only when the examiner asks ──
+router.post('/projects/:id/older-records/check', async (req, res) => {
+  const project = getProject(req.params.id);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+  if (activeCollections.has(project.id)) return res.status(409).json({ error: 'Wait for the running collection to finish' });
+  try {
+    res.json(await checkOlderRecords(project));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ── Quality Control ──
