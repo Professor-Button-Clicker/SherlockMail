@@ -1,6 +1,6 @@
 # SherlockMail*
 
-**v0.9.0** | Desktop forensic email collection for digital forensic and incident response (DFIR) investigations.
+**v0.10.0** | Desktop forensic email collection for digital forensic and incident response (DFIR) investigations.
 
 SherlockMail is a standalone desktop application that collects, preserves, and exports email evidence with forensic integrity. It connects to mailboxes over 7 protocols, downloads messages in their original MIME format, hashes every item on acquisition, and maintains a tamper-evident chain of custody from collection through export. Built for legal, compliance, and investigative professionals who need defensible email evidence.
 
@@ -10,7 +10,7 @@ SherlockMail is a standalone desktop application that collects, preserves, and e
 
 ### Windows Installer (Recommended)
 
-1. Download **SherlockMail.Setup.0.9.0.exe** from the [latest release](../../releases/latest)
+1. Download **SherlockMail.Setup.0.10.0.exe** from the [latest release](../../releases/latest)
 2. Run the installer — it handles everything automatically
 3. Launch SherlockMail from the Start Menu or desktop shortcut
 

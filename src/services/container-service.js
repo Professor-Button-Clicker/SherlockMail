@@ -391,7 +391,7 @@ export class ContainerService {
     try {
       const creator = Buffer.alloc(64 * KB);
       creator.write('vhdxfile', 0, 'ascii');
-      creator.write('SherlockMail v0.9.0', 8, 'utf16le');
+      creator.write('SherlockMail v0.10.0', 8, 'utf16le');
       fs.writeSync(fd, creator, 0, creator.length, 0);
       fs.writeSync(fd, vhdxHeader(1, logOffset, logLength), 0, 64 * KB, 64 * KB);
       fs.writeSync(fd, vhdxHeader(2, logOffset, logLength), 0, 64 * KB, 128 * KB);

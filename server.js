@@ -30,7 +30,7 @@ const DATA_DIR = getArg('data-dir', null);
 
 if (args.includes('--help') || args.includes('-h')) {
   console.log(`
-SherlockMail v0.9.0 — Forensic Email Collection Tool
+SherlockMail v0.10.0 — Forensic Email Collection Tool
 
 Usage: SherlockMail [options]
        node server.js [options]
@@ -144,7 +144,7 @@ const server = app.listen(PORT, HOST, async () => {
   }
   const url = `http://${HOST === '0.0.0.0' || HOST === '::' ? 'localhost' : HOST}:${PORT}`;
   console.log('');
-  console.log('  SherlockMail v0.9.0 — Forensic Email Collection');
+  console.log('  SherlockMail v0.10.0 — Forensic Email Collection');
   console.log(`  Running at ${url}`);
   console.log(`  Data directory: ${dataDir}`);
   console.log('  Press Ctrl+C to stop');

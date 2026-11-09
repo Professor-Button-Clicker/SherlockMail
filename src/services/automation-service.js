@@ -73,7 +73,7 @@ export class AutomationService {
         subject,
         text: this._buildBodyText(notification),
         html: this._buildBodyHtml(notification),
-        headers: { 'X-Mailer': 'SherlockMail v0.9.0' },
+        headers: { 'X-Mailer': 'SherlockMail v0.10.0' },
       });
       transport.close();
       if (info.rejected?.length) return { success: false, error: `Rejected: ${info.rejected.join(', ')}`, accepted: info.accepted };

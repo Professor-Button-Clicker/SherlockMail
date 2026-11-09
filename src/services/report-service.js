@@ -23,7 +23,7 @@ export class ReportService {
     report += `Provider:      ${project.provider_type || project.providerType}\n`;
     report += `Created:       ${project.created_at || project.createdAt}\n`;
     report += `Report Date:   ${now}\n`;
-    report += `Tool:          SherlockMail v0.9.0\n\n`;
+    report += `Tool:          SherlockMail v0.10.0\n\n`;
 
     // Acquisition History
     report += `${sep}\nACQUISITION HISTORY\n${thin}\n\n`;
@@ -100,7 +100,7 @@ export class ReportService {
     report += `Project:       ${project.name}\n`;
     report += `Target:        ${project.target_email || project.targetEmail}\n`;
     report += `Report Date:   ${now}\n`;
-    report += `Tool:          SherlockMail v0.9.0\n\n`;
+    report += `Tool:          SherlockMail v0.10.0\n\n`;
 
     report += `Total Files Tracked: ${driveItems.length}\n`;
     report += `Total Revisions:     ${revisions.length}\n\n`;
