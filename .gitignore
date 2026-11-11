@@ -9,3 +9,6 @@ projects/
 # Agent files stay local: never push them to this repo.
 .claude/
 agent-notes/
+
+# Demo guide (local only unless the user asks to publish it)
+demo/

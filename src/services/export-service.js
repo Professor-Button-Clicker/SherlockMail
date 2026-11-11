@@ -5,6 +5,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { exportMessagesToPst, itemMapCsv, itemMeta } from './pst/pst-export.js';
 import { mimeToMsg } from './msg/msg-writer.js';
+import { caseFields } from '../util/case-fields.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
@@ -875,8 +876,8 @@ ${msgElements}
     <CaseId>${x(project.case_id || project.caseId || '')}</CaseId>
     <ExaminerName>${x(project.examiner_name || project.examinerName || '')}</ExaminerName>
     <Agency>${x(project.agency || '')}</Agency>
-    <EvidenceId>${x(project.evidence_id || project.evidenceId || '')}</EvidenceId>
-    <CustodianFullName>${x(project.custodian_name || project.custodianName || '')}</CustodianFullName>
+    <EvidenceId>${x(caseFields(project).evidenceId || project.evidenceId || '')}</EvidenceId>
+    <CustodianFullName>${x(caseFields(project).custodianName || project.custodianName || '')}</CustodianFullName>
     <EvidenceDescription>${x(project.evidence_description || project.evidenceDescription || '')}</EvidenceDescription>
     <ClientName>${x(project.client_name || project.clientName || '')}</ClientName>
     <ClientMatterNo>${x(project.client_matter_no || project.clientMatterNo || '')}</ClientMatterNo>

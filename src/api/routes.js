@@ -83,6 +83,7 @@ import { MetadataExportService } from '../services/metadata-export.js';
 import { EmailValidator } from '../services/automation-service.js';
 import { encryptSecret, decryptSecret } from '../util/local-secret.js';
 import { applyProxy, describeProxy } from '../util/proxy.js';
+import { caseFields } from '../util/case-fields.js';
 import {
   saveRfc3161Timestamp, getRfc3161Timestamps,
   saveFolderSnapshot, getFolderSnapshots,
@@ -2599,8 +2600,7 @@ router.get('/projects/:id/chain-of-custody', (req, res) => {
   const exports = getExportRecords(project.id);
   const chainVerification = verifyAuditChain(auditLog);
 
-  let config = {};
-  try { config = JSON.parse(project.config || '{}'); } catch {}
+  const { evidenceId, custodianName } = caseFields(project);
 
   const brokenEntries = new Set(chainVerification.breaks.map(b => b.entryId));
   const custodyEvents = auditLog.map(entry => ({
@@ -2626,8 +2626,8 @@ router.get('/projects/:id/chain-of-custody', (req, res) => {
       projectId: project.id,
       caseId: project.case_id,
       caseName: project.case_name,
-      evidenceId: config.evidenceId || project.agency,
-      custodian: config.custodianName || null,
+      evidenceId,
+      custodian: custodianName,
       examiner: project.examiner_name,
       targetEmail: project.target_email,
       provider: project.provider_type,

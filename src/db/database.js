@@ -4,6 +4,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import { caseFields } from '../util/case-fields.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -225,21 +226,33 @@ export function updateProject(id, fields, examiner) {
   const allowed = ['name', 'target_email', 'provider_type', 'case_name', 'case_id', 'examiner_name', 'agency', 'legal_authority', 'legal_scope'];
   const changes = {};
   const sets = [];
+  const values = [];
   for (const key of allowed) {
     if (key in fields && fields[key] !== project[key]) {
       changes[key] = { from: project[key], to: fields[key] };
       sets.push(`${key} = ?`);
+      values.push(fields[key]);
     }
   }
 
+  // Evidence ID and custodian are compared with the value the project actually shows (its column, or an
+  // earlier edit kept in config), so the audit entry records the true previous value and an unchanged
+  // field is not reported as changed. An edit is written to both places, so they cannot disagree again.
   const config = JSON.parse(project.config || '{}');
+  const current = caseFields(project);
+  const columnFor = { evidenceId: 'evidence_id', custodianName: 'custodian_name' };
   const configFields = ['evidenceId', 'custodianName', 'authMethod'];
   let configChanged = false;
   for (const key of configFields) {
-    if (key in fields && fields[key] !== (config[key] || '')) {
-      changes[key] = { from: config[key] || '', to: fields[key] };
-      config[key] = fields[key];
-      configChanged = true;
+    if (!(key in fields)) continue;
+    const before = key in columnFor ? (current[key] || '') : (config[key] || '');
+    if ((fields[key] ?? '') === before) continue;
+    changes[key] = { from: before, to: fields[key] };
+    config[key] = fields[key];
+    configChanged = true;
+    if (columnFor[key]) {
+      sets.push(`${columnFor[key]} = ?`);
+      values.push(fields[key] || null);
     }
   }
 
@@ -248,10 +261,9 @@ export function updateProject(id, fields, examiner) {
   const now = new Date().toISOString();
   if (configChanged) {
     sets.push('config = ?');
+    values.push(JSON.stringify(config));
   }
   sets.push('updated_at = ?');
-  const values = Object.keys(changes).filter(k => allowed.includes(k)).map(k => fields[k]);
-  if (configChanged) values.push(JSON.stringify(config));
   values.push(now, id);
   d.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`).run(...values);
 
