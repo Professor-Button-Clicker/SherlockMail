@@ -111,6 +111,19 @@ const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..',
 
 const router = Router();
 
+// A handler that throws or rejects must fail that one request, never the whole program: a collection for
+// another project may be running in this process. Rejections go to the error handler at the end of this file.
+for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+  const register = router[method].bind(router);
+  router[method] = (route, ...handlers) => register(route, ...handlers.map(handler => (req, res, next) => {
+    try {
+      Promise.resolve(handler(req, res, next)).catch(next);
+    } catch (err) {
+      next(err);
+    }
+  }));
+}
+
 export const CLI_COMMANDS = {
   status: { description: 'List projects, or show one', options: ['[--project <id>]'] },
   collect: { description: 'Run a collection. Connection details come from a JSON file so no password is on the command line', options: ['--project <id>', '--connection <file.json>', '[--folders "INBOX,Sent"]', '[--output <dir>]'] },
@@ -577,7 +590,12 @@ router.get('/oauth/google/status', (req, res) => {
   res.json(getAuthStatus());
 });
 
+// Saving sign-in settings replaces the ones in use, so anything that is not a usable set is refused.
+const hasText = v => typeof v === 'string' && v.trim().length > 0;
+
 router.post('/oauth/google/credentials', (req, res) => {
+  const google = req.body?.installed || req.body?.web;
+  if (!hasText(google?.client_id) || !hasText(google?.client_secret)) return res.status(400).json({ error: 'This is not a Google OAuth client file: it needs "installed" (or "web") with client_id and client_secret' });
   try {
     saveCredentials(req.body);
     res.json({ success: true });
@@ -619,6 +637,7 @@ router.get('/oauth/microsoft/status', (req, res) => {
 });
 
 router.post('/oauth/microsoft/credentials', (req, res) => {
+  if (!hasText(req.body?.client_id)) return res.status(400).json({ error: 'A client (application) ID is required' });
   try {
     msSaveCredentials(req.body);
     res.json({ success: true });
@@ -660,6 +679,7 @@ router.get('/oauth/zoho/status', (req, res) => {
 });
 
 router.post('/oauth/zoho/credentials', (req, res) => {
+  if (!hasText(req.body?.client_id) || !hasText(req.body?.client_secret)) return res.status(400).json({ error: 'A client ID and client secret are required' });
   try {
     zohoSaveCredentials(req.body);
     res.json({ success: true });
@@ -701,6 +721,7 @@ router.get('/oauth/fastmail/status', (req, res) => {
 });
 
 router.post('/oauth/fastmail/credentials', (req, res) => {
+  if (!hasText(req.body?.api_token)) return res.status(400).json({ error: 'An API token is required' });
   try {
     fmSaveCredentials(req.body);
     res.json({ success: true });
@@ -773,6 +794,8 @@ router.put('/projects/:id', (req, res) => {
 });
 
 router.delete('/projects/:id', (req, res) => {
+  if (activeCollections.has(req.params.id)) return res.status(409).json({ error: 'Stop the running collection before deleting this project' });
+  if (!getProject(req.params.id)) return res.status(404).json({ error: 'Project not found' });
   try {
     deleteProject(req.params.id);
     res.json({ success: true });
@@ -919,6 +942,7 @@ router.get('/projects/:id/folders', (req, res) => {
 });
 
 router.post('/projects/:id/folders', (req, res) => {
+  if (!Array.isArray(req.body?.folders)) return res.status(400).json({ error: 'folders must be a list' });
   saveFolders(req.params.id, req.body.folders);
   res.json({ success: true });
 });
@@ -940,10 +964,16 @@ async function retryWithBackoff(fn, retries = MAX_RETRIES) {
   }
 }
 
+// In a differential run a message counts as already collected only when the same bytes are already held
+// from the same folder. A different message that reuses a Message-ID, or a copy filed in another folder,
+// is evidence in its own right and is collected.
+const differentialKey = (hashSha256, folder) => `${hashSha256}
+${folder || ''}`;
+
 function processMessageItem(msg, projectId, acquisitionId, existingIds, differential, errors, opts = {}) {
   const { mimeDir, folderMsgCounters, differentialExclusions, downloadedItems } = opts;
 
-  const isDuplicate = differential && (existingIds.has(msg.messageId) || existingIds.has(msg.hashSha256));
+  const isDuplicate = differential && existingIds.has(differentialKey(msg.hashSha256, msg.folder));
   if (isDuplicate) {
     if (differentialExclusions) {
       differentialExclusions.push({ messageId: msg.messageId, hashSha256: msg.hashSha256, folder: msg.folder });
@@ -1078,7 +1108,7 @@ function createCollectionSink({
     msg.folder = folder;
     const stats = statsFor(folder);
 
-    if (differential && (existingIds.has(msg.messageId) || existingIds.has(msg.hashSha256))) {
+    if (differential && existingIds.has(differentialKey(msg.hashSha256, folder))) {
       differentialExclusions.push({ messageId: msg.messageId, hashSha256: msg.hashSha256, folder });
       stats.skipped++;
       progress.skipped++;
@@ -1424,10 +1454,9 @@ async function runCollectionJob(ctx) {
     const existingIds = new Set();
     if (differential) {
       for (const m of getProjectMessageKeys(project.id)) {
-        if (m.message_id) existingIds.add(m.message_id);
-        if (m.hash_sha256) existingIds.add(m.hash_sha256);
+        if (m.hash_sha256) existingIds.add(differentialKey(m.hash_sha256, m.folder));
       }
-      live.write(`Differential: ${existingIds.size} identifiers from earlier acquisitions of this project will be skipped`);
+      live.write(`Differential: ${existingIds.size} message(s) from earlier acquisitions of this project will be skipped where the same bytes are found in the same folder`);
     }
 
     if (wantsEmail && supportsEngine(protocol)) {
@@ -2057,7 +2086,7 @@ router.post('/projects/:id/search', async (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  const { criteria, queryType, config } = req.body;
+  const { criteria = {}, queryType, config } = req.body;
 
   const dbResults = getMessages(project.id, {
     search: criteria.keyword || criteria.from || criteria.subject,
@@ -3002,6 +3031,7 @@ router.post('/projects/:id/snapshots/compare', (req, res) => {
 // Feature 4: Yahoo OAuth
 router.get('/oauth/yahoo/status', (req, res) => { res.json(yahooGetAuthStatus()); });
 router.post('/oauth/yahoo/credentials', (req, res) => {
+  if (!hasText(req.body?.clientId || req.body?.client_id) || !hasText(req.body?.clientSecret || req.body?.client_secret)) return res.status(400).json({ error: 'A client ID and client secret are required' });
   try { yahooSaveCredentials(req.body); res.json({ success: true }); }
   catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3880,6 +3910,7 @@ router.post('/detect/file', (req, res) => {
   try {
     const { filePath } = req.body;
     if (!filePath) return res.status(400).json({ error: 'filePath required' });
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return res.status(404).json({ error: `File not found: ${filePath}` });
     res.json(FileTypeDetector.detect(filePath));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -3943,6 +3974,8 @@ router.post('/projects/:id/metadata-export/file', (req, res) => {
   try {
     const { type, format, outputPath } = req.body;
     if (!type || !outputPath) return res.status(400).json({ error: 'type and outputPath required' });
+    const outputPathError = notFullPathError(outputPath, 'the metadata file');
+    if (outputPathError) return res.status(400).json({ error: outputPathError });
     const result = MetadataExportService.exportToFile(metadataRows(req.params.id, type), type, outputPath, format || 'csv');
     res.json(result);
   } catch (err) { res.status(err.status || 500).json({ error: err.message }); }
@@ -4071,6 +4104,8 @@ router.post('/session/output-folder', (req, res) => {
   try {
     const { baseDir, projectName, targetEmail, counter } = req.body;
     if (!baseDir) return res.status(400).json({ error: 'baseDir required' });
+    const baseDirError = notFullPathError(baseDir, 'the output folder');
+    if (baseDirError) return res.status(400).json({ error: baseDirError });
     res.json(AutomationService.createOutputFolder(baseDir, projectName, targetEmail, { counter }));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -4252,5 +4287,17 @@ function formatBytesServer(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+
+// An address that is not part of the API is an error, not the app's page.
+router.use((req, res) => {
+  res.status(404).json({ error: `No such API route: ${req.method} ${req.path}` });
+});
+
+// eslint-disable-next-line no-unused-vars
+router.use((err, req, res, next) => {
+  console.error(`[api] ${req.method} ${req.path} failed:`, err);
+  if (res.headersSent) return res.end();
+  res.status(err.status || err.statusCode || 500).json({ error: err.message || 'Internal error' });
+});
 
 export default router;

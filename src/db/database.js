@@ -109,22 +109,31 @@ function computeAuditHash(entry, prevHash) {
   return crypto.createHash('sha256').update(data).digest('hex');
 }
 
+// Entries written from 0.10.1 on are hashed with this: it also covers who made the entry and which project
+// and collection it belongs to, so none of those can be changed, and an entry cannot be moved to another
+// project, without the check failing. Earlier entries keep the hash they were written with.
+function computeAuditHashV2(entry, prevHash) {
+  const data = `v2|${prevHash || ''}|${entry.project_id || ''}|${entry.acquisition_id || ''}|${entry.timestamp}|${entry.event_type}|${entry.description}|${JSON.stringify(entry.details)}|${entry.examiner || ''}`;
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
 // Recomputes every entry's hash from its stored content and previous-hash, so an edited entry is caught,
 // and checks each entry links to the one before it. Entries written before chains were kept per project
-// link to the previous entry of any project; those links are accepted.
+// link to the previous entry of any project; those links are accepted for entries of that age only.
 export function verifyAuditLogChain(entries) {
   const allHashes = new Set(getDb().prepare('SELECT hash FROM audit_log').all().map(r => r.hash));
   const breaks = [];
   let legacyLinks = 0;
   for (let i = 0; i < entries.length; i++) {
     const e = entries[i];
-    const recomputed = computeAuditHash({ timestamp: e.timestamp, event_type: e.event_type, description: e.description, details: e.details }, e.prev_hash);
-    if (recomputed !== e.hash) {
+    const current = computeAuditHashV2(e, e.prev_hash) === e.hash;
+    const earlier = !current && computeAuditHash({ timestamp: e.timestamp, event_type: e.event_type, description: e.description, details: e.details }, e.prev_hash) === e.hash;
+    if (!current && !earlier) {
       breaks.push({ index: i, entryId: e.id, event: e.event_type, timestamp: e.timestamp, problem: 'Entry content no longer matches its hash: the entry was edited after it was written' });
     }
     const expectedPrev = i === 0 ? null : entries[i - 1].hash;
     if ((e.prev_hash || null) === expectedPrev) continue;
-    if (e.prev_hash && allHashes.has(e.prev_hash)) { legacyLinks++; continue; }
+    if (!current && e.prev_hash && allHashes.has(e.prev_hash)) { legacyLinks++; continue; }
     breaks.push({
       index: i, entryId: e.id, event: e.event_type, timestamp: e.timestamp, expected: expectedPrev, got: e.prev_hash,
       problem: e.prev_hash
@@ -140,8 +149,8 @@ export function addAuditEntry(projectId, eventType, description, details, examin
   const prev = d.prepare('SELECT hash FROM audit_log WHERE project_id = ? ORDER BY id DESC LIMIT 1').get(projectId);
   const prevHash = prev?.hash || null;
   const timestamp = new Date().toISOString();
-  const entry = { timestamp, event_type: eventType, description, details: JSON.stringify(details || {}) };
-  const hash = computeAuditHash(entry, prevHash);
+  const entry = { project_id: projectId, acquisition_id: acquisitionId || null, timestamp, event_type: eventType, description, details: JSON.stringify(details || {}), examiner: examiner || null };
+  const hash = computeAuditHashV2(entry, prevHash);
 
   d.prepare(`INSERT INTO audit_log (project_id, acquisition_id, timestamp, event_type, description, details, hash, examiner, prev_hash)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
@@ -432,7 +441,7 @@ export function saveMessagesBatch(msgs) {
 }
 
 export function getProjectMessageKeys(projectId) {
-  return getDb().prepare('SELECT message_id, hash_sha256 FROM messages WHERE project_id = ?').all(projectId);
+  return getDb().prepare('SELECT message_id, hash_sha256, folder FROM messages WHERE project_id = ?').all(projectId);
 }
 
 export function getMessages(projectId, { folder, limit, offset, search } = {}) {
