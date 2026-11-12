@@ -27,6 +27,7 @@
       "src/**/*",
       "assets/icon.png",
       "data/google-credentials.json",
+      "data/microsoft-credentials.json",
       "node_modules/**/*",
       "!node_modules/**/test/**",
       "!node_modules/**/tests/**",
