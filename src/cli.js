@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 
 // Command-line use of a running SherlockMail server, in the same process. Results go to stdout as JSON and
 // the exit code says whether the evidence checks out, so scripts can act on it. Passwords never go on the
@@ -46,7 +47,7 @@ export async function runCli(baseUrl, argv, out = console.log) {
       if (!options.connection) throw new Error('collect needs --connection <file.json> (protocol, host, port, username, password...)');
       const config = JSON.parse(fs.readFileSync(options.connection, 'utf8'));
       const id = project();
-      await call(`/projects/${id}/collect`, { config, folders: options.folders ? String(options.folders).split(',').map(f => f.trim()) : undefined, outputDir: options.output, scope: options.scope || 'email' });
+      await call(`/projects/${id}/collect`, { config, folders: options.folders ? String(options.folders).split(',').map(f => f.trim()) : undefined, outputDir: options.output ? path.resolve(String(options.output)) : undefined, scope: options.scope || 'email' });
       let progress;
       do {
         await new Promise(r => setTimeout(r, 500));
@@ -58,7 +59,7 @@ export async function runCli(baseUrl, argv, out = console.log) {
     }
     case 'import': {
       if (!options.path) throw new Error('import needs --path <file or folder>');
-      const r = await call(`/projects/${project()}/import`, { filePath: options.path, format: options.format });
+      const r = await call(`/projects/${project()}/import`, { filePath: path.resolve(String(options.path)), format: options.format });
       print(r);
       return r.failed || r.folderErrors ? 1 : 0;
     }
@@ -82,7 +83,7 @@ export async function runCli(baseUrl, argv, out = console.log) {
     }
     case 'export': {
       if (!options.format) throw new Error('export needs --format <eml|msg|pst|mbox|mime|pdf|concordance|xml>');
-      const r = await call(`/projects/${project()}/export`, { format: options.format, outputDir: options.output });
+      const r = await call(`/projects/${project()}/export`, { format: options.format, outputDir: options.output ? path.resolve(String(options.output)) : undefined });
       print({ format: r.format, outputDir: r.outputDir, messages: r.messageCount, files: r.files.length, totalBytes: r.totalBytes, failed: r.failedCount, verificationFailures: r.verificationFailures.length, timestamp: r.timestamp });
       return r.failedCount || r.verificationFailures.length ? 1 : 0;
     }

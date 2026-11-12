@@ -147,25 +147,37 @@ export class ImapHandler {
     };
   }
 
-  async fetchBatch(folderPath, refs, deliver) {
+  async fetchBatch(folderPath, refs, deliver, { signal } = {}) {
     await this.openReadOnly(folderPath);
     const byUid = new Map(refs.map(r => [r.uid, r]));
     const out = [];
     const emit = deliver || (item => out.push(item));
     const gmail = this.isGmail();
     const query = { uid: true, flags: true, internalDate: true, source: true, labels: gmail };
-    for await (const m of this.client.fetch(compactUidSet(byUid.keys()), query, { uid: true })) {
-      const ref = byUid.get(m.uid);
-      if (!ref || !m.source) continue;
-      emit({
-        ref,
-        raw: m.source,
-        meta: {
-          flags: m.flags ? [...m.flags] : [],
-          internalDate: m.internalDate ? new Date(m.internalDate).toISOString() : null,
-          ...(gmail && m.labels ? { gmailLabels: [...m.labels] } : {}),
-        },
-      });
+    // A FETCH of up to 50 messages keeps streaming after a stop; closing the connection ends it at once.
+    // Every message delivered before that was received whole and is kept; ensureConnected() reconnects.
+    const onAbort = () => { try { this.client.close(); } catch { /* already closed */ } };
+    if (signal?.aborted) return out;
+    signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      for await (const m of this.client.fetch(compactUidSet(byUid.keys()), query, { uid: true })) {
+        if (signal?.aborted) break;
+        const ref = byUid.get(m.uid);
+        if (!ref || !m.source) continue;
+        emit({
+          ref,
+          raw: m.source,
+          meta: {
+            flags: m.flags ? [...m.flags] : [],
+            internalDate: m.internalDate ? new Date(m.internalDate).toISOString() : null,
+            ...(gmail && m.labels ? { gmailLabels: [...m.labels] } : {}),
+          },
+        });
+      }
+    } catch (err) {
+      if (!signal?.aborted) throw err;
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
     return out;
   }

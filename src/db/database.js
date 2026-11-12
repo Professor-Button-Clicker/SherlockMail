@@ -267,11 +267,16 @@ export function updateProject(id, fields, examiner) {
   values.push(now, id);
   d.prepare(`UPDATE projects SET ${sets.join(', ')} WHERE id = ?`).run(...values);
 
-  const eventType = postCollection ? 'PROJECT_EDITED_POST_COLLECTION' : 'PROJECT_EDITED';
-  const desc = postCollection
-    ? `Project details modified AFTER collection completed — chain of custody impact`
-    : `Project details modified`;
-  addAuditEntry(id, eventType, desc, { changes, postCollection }, examiner || null);
+  // Saving the connection type at the start of a collection is not a change to the case details.
+  const connectionOnly = Object.keys(changes).length === 1 && 'provider_type' in changes;
+  const eventType = connectionOnly ? 'CONNECTION_RECORDED' : postCollection ? 'PROJECT_EDITED_POST_COLLECTION' : 'PROJECT_EDITED';
+  const desc = connectionOnly
+    ? `Connection used for this collection: ${changes.provider_type.to}${changes.provider_type.from ? ` (was ${changes.provider_type.from})` : ''}`
+    : postCollection
+      ? `Project details modified AFTER collection completed — chain of custody impact`
+      : `Project details modified`;
+  const who = examiner || fields.examiner_name || project.examiner_name || null;
+  addAuditEntry(id, eventType, desc, { changes, postCollection }, who);
   return d.prepare('SELECT * FROM projects WHERE id = ?').get(id);
 }
 

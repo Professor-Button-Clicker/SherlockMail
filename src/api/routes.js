@@ -84,6 +84,7 @@ import { EmailValidator } from '../services/automation-service.js';
 import { encryptSecret, decryptSecret } from '../util/local-secret.js';
 import { applyProxy, describeProxy } from '../util/proxy.js';
 import { caseFields } from '../util/case-fields.js';
+import { threadMessages } from '../services/threading.js';
 import {
   saveRfc3161Timestamp, getRfc3161Timestamps,
   saveFolderSnapshot, getFolderSnapshots,
@@ -331,6 +332,15 @@ async function checkDiskSpace(targetPath, minFreeBytes = 500 * 1024 * 1024) {
   }
 }
 
+// A folder SherlockMail writes to must be a full path: "E:Evidence" or "Evidence" would quietly resolve
+// against SherlockMail's own working folder. Returns an error message, or null when the path is fine.
+function notFullPathError(p, what = 'the destination') {
+  if (p == null || (typeof p === 'string' && !p.trim())) return null;
+  const s = String(p).trim();
+  const full = process.platform === 'win32' ? /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(s) : path.isAbsolute(s);
+  return full ? null : `Enter a full path for ${what} (for example D:\\Evidence\\Case-001 or \\\\server\\share\\Case-001), not "${s}".`;
+}
+
 function writeAcquisitionLogs(logsDir, sessionName, ad) {
   const ts = ad.ts || new Date().toISOString().replace(/[:.]/g, '-');
   const quote = v => `"${String(v ?? '').replace(/"/g, '""')}"`;
@@ -348,6 +358,7 @@ function writeAcquisitionLogs(logsDir, sessionName, ad) {
     `Mode: ${ad.differential ? 'Differential (items already collected for this project are skipped)' : 'Full'}`,
     ...(ad.outputDir ? [`Output folder: ${ad.outputDir}`] : []),
     `Query: ${ad.queryDescription || 'None (all messages in the selected folders)'}`,
+    ...(ad.stopNote ? [`Note: ${ad.stopNote}`] : []),
     ...(ad.queryNotes || []).map(n => `  ${n}`),
     ...(ad.queryUnsupported?.length ? [`  Not supported by this protocol and NOT applied: ${ad.queryUnsupported.join(', ')}`] : []),
     ``,
@@ -1208,7 +1219,9 @@ function parseCollectRequest(project, body) {
   return { scope, config, protocol, destinationDir, query, queryPlan, wantsEmail: scope !== 'drive', wantsDrive: scope !== 'email' };
 }
 
-function validateCollectTarget({ scope, protocol, wantsEmail, wantsDrive }) {
+function validateCollectTarget({ scope, protocol, wantsEmail, wantsDrive, destinationDir }) {
+  const destinationError = notFullPathError(destinationDir, 'the destination folder');
+  if (destinationError) return destinationError;
   if (wantsEmail && !supportsEngine(protocol) && !LEGACY_PROTOCOLS.has(protocol)) {
     return `Unsupported protocol: ${protocol || '(none)'}`;
   }
@@ -1685,6 +1698,8 @@ async function runCollectionJob(ctx) {
       progress.lastError = fatal.message;
     } else if (canceled) {
       live.write(`Collection stopped: ${job.cancelReason || 'canceled'}; ${remaining} item(s) not collected`);
+    } else if (stopRequested) {
+      live.write(`Stop requested (${job.cancelReason || 'stopped'}), but every item had already been collected`);
     }
 
     progress.phase = 'finalizing';
@@ -1709,6 +1724,7 @@ async function runCollectionJob(ctx) {
         ...baseLog(),
         totalFound, acquired, skipped: differentialSkipped, failed: progress.failed, remaining, totalBytes, completionType,
         excluded: progress.excluded, recovered: progress.recoveredOnRetry || 0, drive: driveResult,
+        stopNote: stopRequested && !canceled ? `Stop requested (${job.cancelReason || 'stopped'}) after every item had already been collected; nothing was left out.` : null,
       });
       const manifest = writeDriveManifest(logsDir, ts, driveResult);
       attachmentManifest = writeAttachmentManifest(logsDir, ts, attachmentLog);
@@ -2086,6 +2102,9 @@ router.post('/projects/:id/search', async (req, res) => {
       folder: m.folder,
       hash_sha256: m.hash_sha256,
       has_attachments: m.has_attachments,
+      size: m.size,
+      is_signed: m.is_signed,
+      is_encrypted: m.is_encrypted,
     })),
     localResultCount: dbResults.length,
   });
@@ -2336,39 +2355,7 @@ router.get('/projects/:id/analytics/threading', (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const messages = getAllProjectMessages(project.id);
-  const threads = [];
-  const assigned = new Set();
-  const parent = new Map(messages.map(m => [m.id, m.id]));
-  const find = (id) => {
-    let root = id;
-    while (parent.get(root) !== root) root = parent.get(root);
-    while (parent.get(id) !== root) { const next = parent.get(id); parent.set(id, root); id = next; }
-    return root;
-  };
-  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent.set(ra, rb); };
-  const byMessageId = new Map();
-  for (const m of messages) {
-    if (!m.message_id) continue;
-    if (!byMessageId.has(m.message_id)) byMessageId.set(m.message_id, m.id);
-    else union(byMessageId.get(m.message_id), m.id);
-  }
-  for (const m of messages) {
-    const related = new Set(m.in_reply_to ? [m.in_reply_to] : []);
-    try {
-      const headers = JSON.parse(m.headers_json || '{}');
-      const refs = headers.references;
-      for (const r of Array.isArray(refs) ? refs : String(refs || '').split(/\s+/)) if (r) related.add(r);
-    } catch { /* a message with unreadable headers still threads by In-Reply-To */ }
-    for (const ref of related) if (byMessageId.has(ref)) union(m.id, byMessageId.get(ref));
-  }
-  const groups = new Map();
-  for (const m of messages) {
-    const root = find(m.id);
-    if (!groups.has(root)) groups.set(root, []);
-    groups.get(root).push(m);
-  }
-  const threadOf = (group, threadedBy) => {
-    const sorted = [...group].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+  const threads = threadMessages(messages).filter(g => g.threadedBy !== 'single').map(({ messages: sorted, threadedBy }) => {
     const dated = sorted.filter(m => m.date);
     return {
       rootMessageId: sorted[0].message_id,
@@ -2381,33 +2368,14 @@ router.get('/projects/:id/analytics/threading', (req, res) => {
       threadedBy,
       messages: sorted.map(m => ({ id: m.id, subject: m.subject, from: m.from_address, date: m.date, inReplyTo: m.in_reply_to, messageId: m.message_id })),
     };
-  };
-  const subjectGroups = new Map();
-  for (const group of groups.values()) {
-    if (group.length > 1) {
-      threads.push(threadOf(group, 'headers'));
-      group.forEach(m => assigned.add(m.id));
-    } else {
-      const key = (group[0].subject || '').replace(/^((Re|Fwd|Fw)\s*:\s*)+/i, '').trim().toLowerCase();
-      if (key && key !== '(no subject)') {
-        if (!subjectGroups.has(key)) subjectGroups.set(key, []);
-        subjectGroups.get(key).push(group[0]);
-      }
-    }
-  }
-  for (const group of subjectGroups.values()) {
-    if (group.length > 1) {
-      threads.push(threadOf(group, 'subject'));
-      group.forEach(m => assigned.add(m.id));
-    }
-  }
-
+  });
   threads.sort((a, b) => b.messageCount - a.messageCount);
+  const threadedMessages = threads.reduce((n, t) => n + t.messageCount, 0);
 
   res.json({
     totalMessages: messages.length,
-    threadedMessages: assigned.size,
-    singleMessages: messages.length - assigned.size,
+    threadedMessages,
+    singleMessages: messages.length - threadedMessages,
     threadCount: threads.length,
     threads: threads.slice(0, 100),
   });
@@ -2721,6 +2689,8 @@ function pstSizeGb(value) {
 }
 
 async function performExport(project, { format, outputDir: customOutputDir, pdfSplitMode, pstMaxGb, preserveFolders, messages: only, label, onProgress }) {
+  const exportPathError = notFullPathError(customOutputDir, 'the export folder');
+  if (exportPathError) throw new Error(exportPathError);
   if (!EXPORT_FORMATS.has(format)) throw httpError(400, `Unknown export format: ${format}`);
   const messages = only || getAllProjectMessages(project.id);
   if (messages.length === 0) throw httpError(400, 'No messages to export. Collect messages first.');
@@ -3308,6 +3278,8 @@ router.post('/projects/:id/export/vhdx', async (req, res) => {
     if (!sourceDir) return res.status(400).json({ error: 'Nothing to package: run an export first, or choose a folder' });
     if (!fs.existsSync(sourceDir) || !fs.statSync(sourceDir).isDirectory()) return res.status(400).json({ error: `Folder not found: ${sourceDir}` });
     const name = `${(project.name || 'evidence').replace(/[^\w.-]+/g, '_')}_${new Date().toISOString().replace(/[:.]/g, '-')}.vhdx`;
+    const vhdxPathError = notFullPathError(req.body?.outputPath, 'the image file') || notFullPathError(req.body?.outputDir, 'the image folder');
+    if (vhdxPathError) return res.status(400).json({ error: vhdxPathError });
     const outputPath = req.body?.outputPath || path.join(req.body?.outputDir || path.join(DATA_DIR, 'containers', project.id), name);
     const result = await ContainerService.createVhdxContainer(sourceDir, outputPath, { label: project.case_id || project.name });
     addAuditEntry(project.id, 'VHDX_CREATED', `VHDX container created from ${sourceDir} (${result.fileCount} files, ${result.size} bytes)`, { sourceDir, outputPath, hashes: result.hashes, contentsManifest: result.contentsManifest }, project.examiner_name);
@@ -3332,6 +3304,8 @@ router.post('/projects/:id/export/pst-create', async (req, res) => {
 router.post('/convert/pst', async (req, res) => {
   const inputs = [].concat(req.body.inputs || req.body.input || []).filter(p => typeof p === 'string' && p.trim()).map(p => path.resolve(p.trim()));
   if (!inputs.length) return res.status(400).json({ error: 'Choose a folder or file of EML/MBOX messages to convert' });
+  const convertPathError = notFullPathError(req.body.outputDir, 'the output folder');
+  if (convertPathError) return res.status(400).json({ error: convertPathError });
   const outputDir = req.body.outputDir ? path.resolve(req.body.outputDir) : path.join(DATA_DIR, 'conversions', `pst_${new Date().toISOString().replace(/[:.]/g, '-')}`);
   for (const input of inputs) {
     const rel = path.relative(input, outputDir);
@@ -4191,6 +4165,8 @@ router.post('/projects/:id/transfer', async (req, res) => {
 
   const { source, destination, mode, zipPassword } = req.body;
   if (!source || !destination) return res.status(400).json({ error: 'Source and destination are required' });
+  const pathError = notFullPathError(destination, 'the transfer destination');
+  if (pathError) return res.status(400).json({ error: pathError });
 
   if (!fs.existsSync(source)) return res.status(400).json({ error: 'Source directory does not exist' });
   const norm = p => path.resolve(p).replace(/[\\/]+$/, '').toLowerCase() + path.sep;

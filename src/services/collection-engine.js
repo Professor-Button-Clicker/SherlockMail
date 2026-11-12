@@ -529,7 +529,7 @@ export async function runCollection({
           await pacer.take(signal);
           if (signal?.aborted) return;
           if (handler.ensureConnected) await handler.ensureConnected();
-          await handler.fetchBatch(job.key, remaining, deliver);
+          await handler.fetchBatch(job.key, remaining, deliver, { signal });
           pacer.succeeded();
           if (job.refs.length === 1 && !delivered.size) throw new Error('Server returned no content for item');
         }, {

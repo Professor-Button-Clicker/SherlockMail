@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { ContainerService } from './container-service.js';
+import { caseFields } from '../util/case-fields.js';
 
 export class ReportService {
 
@@ -17,7 +18,9 @@ export class ReportService {
     report += `${sep}\n\n`;
     report += `Project:       ${project.name}\n`;
     report += `Case ID:       ${project.case_id || project.caseId || 'N/A'}\n`;
-    report += `Case Name:     ${project.case_name || project.caseName || 'N/A'}\n`;
+    if (project.case_name || project.caseName) report += `Case Name:     ${project.case_name || project.caseName}\n`;
+    report += `Evidence ID:   ${caseFields(project).evidenceId || 'N/A'}\n`;
+    report += `Custodian:     ${caseFields(project).custodianName || 'N/A'}\n`;
     report += `Examiner:      ${project.examiner_name || project.examinerName || 'N/A'}\n`;
     report += `Target:        ${project.target_email || project.targetEmail}\n`;
     report += `Provider:      ${project.provider_type || project.providerType}\n`;

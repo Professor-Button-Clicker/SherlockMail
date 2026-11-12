@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { exportMessagesToPst, itemMapCsv, itemMeta } from './pst/pst-export.js';
 import { mimeToMsg } from './msg/msg-writer.js';
 import { caseFields } from '../util/case-fields.js';
+import { threadMessages } from './threading.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
@@ -228,7 +229,7 @@ export class ExportService {
             groups = this._groupByFolder(messages);
             break;
           case 'thread':
-            groups = this._groupByThread(messages).map(t => ({ label: t.subject, messages: t.messages }));
+            groups = threadMessages(messages).map(t => ({ label: t.messages[0].subject || '(no subject)', messages: t.messages }));
             break;
           case 'email':
             groups = messages.map(m => ({ label: m.subject || '(no subject)', messages: [m] }));
@@ -238,7 +239,7 @@ export class ExportService {
         }
         for (const group of groups) {
           try {
-            const result = this.generatePdf(group.messages, projectId, group.label, options.attachmentsByMessage);
+            const result = this.generatePdf(group.messages, projectId, group.label, options.attachmentsByMessage, options.project);
             // Thread and message subjects repeat; a later PDF must never overwrite an earlier one.
             const filePath = uniquePath(outputDir, result.filename);
             const { content, ...fileInfo } = result;
@@ -250,7 +251,7 @@ export class ExportService {
       }
 
       case 'concordance': {
-        const datResult = this.generateConcordanceDat(messages);
+        const datResult = this.generateConcordanceDat(messages, caseFields(options.project || {}).custodianName || '');
         const datPath = path.join(outputDir, datResult.filename);
         fs.writeFileSync(datPath, datResult.content, 'utf8');
         const { content: _dat, ...datInfo } = datResult;
@@ -538,7 +539,7 @@ export class ExportService {
 
   // A plain PDF 1.4 with the standard fonts, whose WinAnsi encoding covers Western European text. Bodies are
   // wrapped, never cut; a character the fonts cannot show prints as "?" and the report counts them.
-  static generatePdf(messages, projectId, threadLabel = null, attachmentsByMessage = null) {
+  static generatePdf(messages, projectId, threadLabel = null, attachmentsByMessage = null, project = null) {
     const now = new Date().toISOString();
     let replacedChars = 0;
     const WIN_ANSI_EXTRA = { 0x20AC: 0x80, 0x201A: 0x82, 0x0192: 0x83, 0x201E: 0x84, 0x2026: 0x85, 0x2020: 0x86, 0x2021: 0x87, 0x02C6: 0x88, 0x2030: 0x89, 0x0160: 0x8A, 0x2039: 0x8B, 0x0152: 0x8C, 0x017D: 0x8E, 0x2018: 0x91, 0x2019: 0x92, 0x201C: 0x93, 0x201D: 0x94, 0x2022: 0x95, 0x2013: 0x96, 0x2014: 0x97, 0x02DC: 0x98, 0x2122: 0x99, 0x0161: 0x9A, 0x203A: 0x9B, 0x0153: 0x9C, 0x017E: 0x9E, 0x0178: 0x9F };
@@ -619,7 +620,9 @@ export class ExportService {
 
     addLine(threadLabel ? `Thread: ${threadLabel}` : 'SherlockMail Forensic Email Report', '/F2', 16);
     addGap(4);
-    addLine(`Project: ${projectId}  |  Generated: ${now}  |  Messages: ${messages.length}`, '/F1', 9);
+    const caseLabel = project ? [project.name, project.case_id && `Case ID ${project.case_id}`, caseFields(project).evidenceId && `Evidence ID ${caseFields(project).evidenceId}`].filter(Boolean).join('  |  ') : `Project ${projectId}`;
+    addLine(`Project: ${caseLabel}`, '/F1', 9);
+    addLine(`Generated: ${now}  |  Messages: ${messages.length}`, '/F1', 9);
     addLine('Tool: SherlockMail v0.10.0  |  Hash Algorithm: SHA-256  |  Times in UTC', '/F1', 9);
     addGap(6);
     addRule();
@@ -704,7 +707,7 @@ export class ExportService {
     };
   }
 
-  static generateConcordanceDat(messages) {
+  static generateConcordanceDat(messages, custodian = '') {
     // Concordance's default delimiters: DC4 (ASCII 20) between fields, thorn (ASCII 254) around each value.
     const D = '\u0014';
     const Q = '\u00fe';
@@ -752,7 +755,7 @@ export class ExportService {
 
       // Attachments stay inside their message, so a family's range is the message's own number.
       const vals = [msg.id, batesBegin, batesEnd, batesBegin, batesEnd,
-        msg.custodian || '', from, to, cc, bcc, subject, dateSent, timeSent,
+        msg.custodian || custodian, from, to, cc, bcc, subject, dateSent, timeSent,
         dateRcvd, timeRcvd, folder, hasAtt, attCount, size, msgId, convIdx, parentId,
         md5, sha256, body];
       return vals.map(v => `${Q}${String(v ?? '').replace(/[\u0014\u00fe]/g, ' ').replace(/[\r\n]+/g, NEWLINE)}${Q}`).join(D);

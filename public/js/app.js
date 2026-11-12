@@ -982,7 +982,7 @@ async function loadExportHistory() {
         <tbody>
           ${exports.map(e => `
             <tr>
-              <td style="font-family:var(--font-mono);font-size:11px">${formatTimestamp(e.created_at)}</td>
+              <td style="font-family:var(--font-mono);font-size:11px">${formatTimestamp(e.completed_at || e.started_at)}</td>
               <td><span class="event-badge event-EXPORT_COMPLETED">${(e.format || '').toUpperCase()}</span></td>
               <td>${e.message_count}</td>
               <td style="font-family:var(--font-mono)">${formatBytes(e.total_bytes)}</td>
@@ -1685,7 +1685,7 @@ function renderDedup(data) {
         <span style="font-size:13px;font-weight:500">Dedup Savings</span>
         <span style="font-weight:600;color:${barColor}">${data.dedupSavingsPercent}%</span>
       </div>
-      <div style="height:20px;background:var(--bg-main);border-radius:10px;overflow:hidden">
+      <div style="height:20px;background:var(--bg-overlay);border-radius:10px;overflow:hidden">
         <div style="height:100%;background:${barColor};border-radius:10px;width:${savingsPct}%;transition:width 0.3s"></div>
       </div>
       <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--text-muted)">
@@ -1855,7 +1855,7 @@ function showHeaderAnalysis(data) {
   ).join('');
 
   modal.innerHTML = `
-    <div style="background:var(--bg-main);border:1px solid var(--border);border-radius:8px;width:700px;max-height:85vh;overflow-y:auto;padding:24px">
+    <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:8px;width:700px;max-height:85vh;overflow-y:auto;padding:24px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
         <h3 style="margin:0;font-size:16px">Email Header Analysis</h3>
         <button onclick="this.closest('div[style*=fixed]').remove()" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px">✕</button>
@@ -3075,6 +3075,8 @@ function wizAttachToCollection(project, { started, progress } = {}) {
 
 function wizCollectionFinished(project, result, live) {
   if (wizLive === live) wizLive = null;
+  wizEstimate = null;
+  wizEstimateKey = '';
   if (wizCollecting?.projectId === project.id) wizCollecting = null;
   wizUpdateUnloadGuard();
   pollActiveCollections();

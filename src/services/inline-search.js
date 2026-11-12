@@ -286,7 +286,13 @@ export class InlineSearchEngine {
       if (token.value.startsWith('<')) return current < target;
       return current === target;
     }
-    return this.fieldText(token.field, msg, options).toLowerCase().includes(value);
+    const text = this.fieldText(token.field, msg, options).toLowerCase();
+    // Field values match as substrings, so * and ? are wildcards anywhere in them, leading ones included.
+    if (/[*?]/.test(value)) {
+      const body = value.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+      return new RegExp(body, 'i').test(text);
+    }
+    return text.includes(value);
   }
 
   static levenshtein(a, b) {
