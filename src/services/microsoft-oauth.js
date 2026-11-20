@@ -25,18 +25,21 @@ function ensureDataDir() {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
+function readJson(p) {
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; }
+}
+
+// The app registration shipped with SherlockMail is always used, read fresh from the program folder, so a
+// new client secret in a new installer reaches every install. Only an examiner who saved a different
+// application (client) ID of their own keeps theirs. Older versions copied the shipped file into the data
+// folder; a copy with the shipped client ID is treated as the shipped registration, not as the examiner's.
 export function loadCredentials() {
-  if (fs.existsSync(getCredentialsPath())) {
-    return JSON.parse(fs.readFileSync(getCredentialsPath(), 'utf8'));
-  }
   const bundledPath = path.join(BUNDLED_DIR, 'microsoft-credentials.json');
-  if (bundledPath !== getCredentialsPath() && fs.existsSync(bundledPath)) {
-    const raw = JSON.parse(fs.readFileSync(bundledPath, 'utf8'));
-    ensureDataDir();
-    fs.writeFileSync(getCredentialsPath(), JSON.stringify(raw, null, 2));
-    return raw;
-  }
-  return null;
+  const bundled = bundledPath !== getCredentialsPath() ? readJson(bundledPath) : null;
+  const saved = fs.existsSync(getCredentialsPath()) ? readJson(getCredentialsPath()) : null;
+  if (saved?.client_id && (!bundled?.client_id || saved.client_id !== bundled.client_id)) return saved;
+  if (bundled?.client_id) return bundled;
+  return saved;
 }
 
 export function saveCredentials(credentialsJson) {
