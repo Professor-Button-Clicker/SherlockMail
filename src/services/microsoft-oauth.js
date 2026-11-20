@@ -249,9 +249,17 @@ export function startCallbackServer() {
         const errorDesc = url.searchParams.get('error_description');
 
         if (error) {
-          res.writeHead(200, { 'Content-Type': 'text/html' });
-          res.end(`<html><body><h2>Authorization denied.</h2><p>${errorDesc || error}</p><p>You can close this window.</p></body></html>`);
-          authWaiters.settle({ error: errorDesc || error });
+          let message = errorDesc || error;
+          // Microsoft refuses the Exchange (EWS) permission for personal accounts, and with it the whole sign-in.
+          if (requestedScopes.includes(PROTOCOL_SCOPES.ews) && /invalid_scope|resource value|AADSTS70011|AADSTS650053/i.test(`${error} ${errorDesc}`)) {
+            message = 'EWS works only for work or school (Microsoft 365) accounts. Outlook.com, Hotmail and Live accounts cannot use it: '
+              + 'choose the Graph API, IMAP (OAuth) or POP3 (OAuth) profile instead and authorize again. '
+              + `(Microsoft said: ${errorDesc || error})`;
+          }
+          const html = String(message).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(`<html><body><h2>Authorization denied.</h2><p>${html}</p><p>You can close this window.</p></body></html>`);
+          authWaiters.settle({ error: message });
           return;
         }
 
