@@ -104,7 +104,7 @@ export class Pop3Handler {
       }
       this.pending.push({ multi, resolve, reject });
       if (command !== null) {
-        this.log('C→S', command.startsWith('PASS ') ? 'PASS ****' : command);
+        this.log('C→S', command.startsWith('PASS ') ? 'PASS ****' : this.secretLine === command ? '[XOAUTH2 token, not logged]' : command);
         this.socket.write(command + '\r\n');
       }
     });
@@ -141,7 +141,7 @@ export class Pop3Handler {
   }
 
   async handshake() {
-    const { username, password, email } = this.config;
+    const { username, password, email, accessToken } = this.config;
     await this.request(null);
     this.capabilities = new Set();
     try {
@@ -153,8 +153,17 @@ export class Pop3Handler {
       // CAPA is optional (RFC 2449); servers without it get no pipelining.
     }
 
-    await this.request(`USER ${username || email}`);
-    await this.request(`PASS ${password}`);
+    if (accessToken) {
+      // RFC 7628-style XOAUTH2, as Microsoft's POP3 expects it: AUTH XOAUTH2, a "+" prompt, then the token.
+      const ctrlA = String.fromCharCode(1);
+      const sasl = Buffer.from(`user=${username || email}${ctrlA}auth=Bearer ${accessToken}${ctrlA}${ctrlA}`).toString('base64');
+      await this.request('AUTH XOAUTH2');
+      this.secretLine = sasl;
+      try { await this.request(sasl); } finally { this.secretLine = null; }
+    } else {
+      await this.request(`USER ${username || email}`);
+      await this.request(`PASS ${password}`);
+    }
 
     const { status } = await this.request('STAT');
     const [, count, size] = status.match(/\+OK\s+(\d+)\s+(\d+)/) || [null, '0', '0'];

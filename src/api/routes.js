@@ -44,7 +44,7 @@ import {
 } from '../services/google-oauth.js';
 import {
   getAuthStatus as msGetAuthStatus, getAuthUrl as msGetAuthUrl,
-  saveCredentials as msSaveCredentials, getAccessToken as msGetAccessToken,
+  saveCredentials as msSaveCredentials, getAccessToken as msGetAccessToken, getProtocolAccessToken as msGetProtocolToken,
   startCallbackServer as msStartCallbackServer, waitForAuth as msWaitForAuth,
   stopCallbackServer as msStopCallbackServer, revokeTokens as msRevokeTokens,
 } from '../services/microsoft-oauth.js';
@@ -1187,9 +1187,11 @@ async function createHandler(protocol, rawConfig, project) {
         config.accessToken = await yahooGetAccessToken();
         config.username = config.username || yahooGetAuthStatus().email || config.email;
       }
+      await useMicrosoftSignIn(config, 'imap');
       return new ImapHandler(config);
     case 'pop3':
       if (!config.host) throw new Error('POP3 host is required');
+      await useMicrosoftSignIn(config, 'pop3');
       return new Pop3Handler(config);
     case 'ews': {
       const session = config.enterpriseSessionId ? EnterpriseAuthService.getSession(config.enterpriseSessionId) : null;
@@ -1201,10 +1203,11 @@ async function createHandler(protocol, rawConfig, project) {
         config.accessToken = await session.tokenFor(resource);
         // An app-only token reaches a mailbox only by impersonating it.
         if (session.authMethod !== 'imported') config.impersonate = config.targetUser || config.email;
-      } else if (!config.password && msGetAuthStatus().authorized) {
+      } else if (!config.password && !config.accessToken && msGetAuthStatus().authorized) {
+        // EWS needs a token issued for Exchange, not the Graph one.
         config.authType = 'oauth2';
-        config.tokenProvider = msGetAccessToken;
-        config.accessToken = await msGetAccessToken();
+        config.tokenProvider = ({ force } = {}) => msGetProtocolToken('ews', { force });
+        config.accessToken = await msGetProtocolToken('ews');
       }
       return new EwsHandler(config);
     }
@@ -1226,6 +1229,17 @@ async function createHandler(protocol, rawConfig, project) {
     default:
       throw new Error(`Unsupported protocol: ${protocol}`);
   }
+}
+
+// IMAP or POP3 with OAuth against Microsoft and no pasted token: sign in with the saved Microsoft sign-in,
+// using a token issued for that protocol.
+async function useMicrosoftSignIn(config, protocol) {
+  if (config.authMethod !== 'oauth2' || config.accessToken || config.password) return;
+  const microsoftHost = /(^|\.)(outlook\.office365\.com|outlook\.office\.com)$/i.test(config.host || '');
+  if (!microsoftHost && !String(config.profileId || '').startsWith('ms-')) return;
+  if (!msGetAuthStatus().authorized) throw new Error('Microsoft account not authorized. Click "Authorize with Microsoft" first.');
+  config.accessToken = await msGetProtocolToken(protocol);
+  config.username = config.email || config.username;
 }
 
 // Gmail lists labels, POP3 has a single unnamed mailbox.

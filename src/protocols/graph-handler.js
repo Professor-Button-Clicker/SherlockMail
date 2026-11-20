@@ -151,10 +151,20 @@ export class GraphHandler {
     this.log('CLIENT', 'Connecting to Microsoft Graph API via OAuth2');
     this.log('C→S', `GET ${this.base}/me`);
 
-    const profile = await this.graphFetch(this.me);
-    this.userEmail = profile.mail || profile.userPrincipalName;
-
-    this.log('S→C', `200 OK - displayName: "${profile.displayName}", mail: "${this.userEmail}"`);
+    // A sign-in made before User.Read was requested can read mail but not the profile. The mailbox check
+    // below is what decides whether the connection works; the profile only names the account.
+    let profile = {};
+    try {
+      // No token refresh on a 401 here: a refresh cannot add a missing permission, and an expired token is
+      // refreshed by the mailbox check below.
+      profile = await this.graphRequest(this.me, { retriedAuth: true });
+      this.userEmail = profile.mail || profile.userPrincipalName;
+      this.log('S→C', `200 OK - displayName: "${profile.displayName}", mail: "${this.userEmail}"`);
+    } catch (err) {
+      if (err.status !== 401 && err.status !== 403) throw err;
+      this.userEmail = this.config?.email || this.config?.targetUser || null;
+      this.log('S→C', `${err.status} - profile not readable with this sign-in (no User.Read); the account is named from the project: "${this.userEmail}"`);
+    }
 
     this.log('C→S', `GET ${this.base}/me/mailFolders?$top=1`);
     await this.graphFetch(`${this.me}/mailFolders?$top=1&$select=id`);

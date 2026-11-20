@@ -2258,7 +2258,10 @@ function wizUpdateProtocolFields() {
   if (ewsSection) ewsSection.style.display = protocol === 'ews' ? '' : 'none';
 
   gmailOAuth.style.display = protocol === 'gmail_api' ? '' : 'none';
-  msOAuth.style.display = (protocol === 'graph' || protocol === 'ews') ? '' : 'none';
+  // Microsoft IMAP/POP3 with OAuth sign in through the same Microsoft panel (no token to paste).
+  const profileId = document.getElementById('wiz-collection-profile')?.value || '';
+  const msMailOAuth = ['ms-imap-oauth', 'ms-pop3-oauth'].includes(profileId) && (protocol === 'imap' || protocol === 'pop3');
+  msOAuth.style.display = (protocol === 'graph' || protocol === 'ews' || msMailOAuth) ? '' : 'none';
   zohoOAuth.style.display = protocol === 'zoho_api' ? '' : 'none';
   fmAuth.style.display = protocol === 'jmap' ? '' : 'none';
 
@@ -2425,7 +2428,8 @@ function wizUpdateAuthLabel() {
   const method = document.getElementById('wiz-auth-method').value;
   const label = document.getElementById('wiz-pass-label');
   if (method === 'app-password') label.textContent = 'App-Specific Password';
-  else if (method === 'oauth2') label.textContent = 'Access Token';
+  else if (method === 'oauth2') label.textContent = ['ms-imap-oauth', 'ms-pop3-oauth'].includes(document.getElementById('wiz-collection-profile')?.value)
+    ? 'Access Token (leave empty: uses the Microsoft sign-in above)' : 'Access Token';
   else if (method === 'yahoo_oauth') label.textContent = 'Not needed: uses the Yahoo sign-in from Tools';
   else label.textContent = 'Password';
 }
@@ -3578,7 +3582,10 @@ async function msAuthorize() {
   el.innerHTML = '<span style="color:var(--accent)">Opening Microsoft authorization...</span>';
 
   try {
-    const { url } = await api('/oauth/microsoft/authorize');
+    // IMAP, POP3 and EWS each need Microsoft's consent for that protocol, asked for in the same sign-in.
+    const protocol = document.getElementById('wiz-protocol')?.value;
+    const features = ['imap', 'pop3', 'ews'].includes(protocol) ? `?features=${protocol}` : '';
+    const { url } = await api(`/oauth/microsoft/authorize${features}`);
     if (!url) { el.innerHTML = '<span class="verify-fail">Save credentials first</span>'; return; }
 
     window.open(url, '_blank');
