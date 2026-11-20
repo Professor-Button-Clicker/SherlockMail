@@ -2429,7 +2429,7 @@ function wizUpdateAuthLabel() {
   const label = document.getElementById('wiz-pass-label');
   if (method === 'app-password') label.textContent = 'App-Specific Password';
   else if (method === 'oauth2') label.textContent = ['ms-imap-oauth', 'ms-pop3-oauth'].includes(document.getElementById('wiz-collection-profile')?.value)
-    ? 'Access Token (leave empty: uses the Microsoft sign-in above)' : 'Access Token';
+    ? 'Access Token (leave empty: uses the Microsoft sign-in below)' : 'Access Token';
   else if (method === 'yahoo_oauth') label.textContent = 'Not needed: uses the Yahoo sign-in from Tools';
   else label.textContent = 'Password';
 }

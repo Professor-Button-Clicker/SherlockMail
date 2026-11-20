@@ -20,6 +20,13 @@ function compactUidSet(uids) {
 
 // imapflow reports most server refusals as "Command failed"; the server's own words are in responseText.
 function withServerText(err) {
+  // Microsoft accepted the token but will not open the mailbox over IMAP. Seen on Outlook.com accounts whose
+  // IMAP access is off, and on some Outlook.com mailboxes even with it on; Graph reaches the same mailbox.
+  if (/authenticated but not connected/i.test(err?.responseText || err?.message || '')) {
+    return new Error('Microsoft accepted the sign-in but would not open this mailbox over IMAP ("User is authenticated but not connected"). '
+      + 'For Outlook.com/Hotmail, turn on IMAP in Outlook on the web (Settings > Mail > Forwarding and IMAP), wait a few minutes and test again; '
+      + 'for Microsoft 365, the administrator must allow IMAP for this mailbox. Some Outlook.com mailboxes refuse IMAP even then: use the Graph API profile, which reads the same mailbox.');
+  }
   if (err?.authenticationFailed) return new Error(`The server refused the sign-in: ${err.responseText || err.serverResponseCode || 'wrong user name, password or token'}`);
   if (err?.responseText && !String(err.message).includes(err.responseText)) err.message = `${err.message}: ${err.responseText}`;
   return err;
