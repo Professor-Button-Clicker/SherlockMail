@@ -623,7 +623,7 @@ export class ExportService {
     const caseLabel = project ? [project.name, project.case_id && `Case ID ${project.case_id}`, caseFields(project).evidenceId && `Evidence ID ${caseFields(project).evidenceId}`].filter(Boolean).join('  |  ') : `Project ${projectId}`;
     addLine(`Project: ${caseLabel}`, '/F1', 9);
     addLine(`Generated: ${now}  |  Messages: ${messages.length}`, '/F1', 9);
-    addLine('Tool: SherlockMail v0.10.0  |  Hash Algorithm: SHA-256  |  Times in UTC', '/F1', 9);
+    addLine('Tool: SherlockMail v0.10.1  |  Hash Algorithm: SHA-256  |  Times in UTC', '/F1', 9);
     addGap(6);
     addRule();
     addGap(12);
@@ -829,7 +829,7 @@ export class ExportService {
     }).join('\n');
 
     const content = `<?xml version="1.0" encoding="UTF-8"?>
-<sherlockMailExport version="1.0" generated="${x(now)}" tool="SherlockMail v0.10.0">
+<sherlockMailExport version="1.0" generated="${x(now)}" tool="SherlockMail v0.10.1">
   <project id="${x(projectId)}"/>
   <summary>
     <totalMessages>${messages.length}</totalMessages>
@@ -873,7 +873,7 @@ ${msgElements}
     const content = `<?xml version="1.0" encoding="UTF-8"?>
 <SessionManifest xmlns="urn:sherlockmail:manifest:1.0" version="1.0">
   <GeneratedAt>${x(now)}</GeneratedAt>
-  <Tool>SherlockMail v0.10.0</Tool>
+  <Tool>SherlockMail v0.10.1</Tool>
   <CaseInformation>
     <CaseName>${x(project.case_name || project.caseName || '')}</CaseName>
     <CaseId>${x(project.case_id || project.caseId || '')}</CaseId>
@@ -989,7 +989,7 @@ ${fileEntries}
     text += `SHERLOCKMAIL FORENSIC EXPORT MANIFEST\n`;
     text += `${sep}\n`;
     text += `Generated:       ${generated}\n`;
-    text += `Tool:            SherlockMail v0.10.0\n`;
+    text += `Tool:            SherlockMail v0.10.1\n`;
     text += `Hash Algorithms: MD5, SHA-1, SHA-256 (each file re-read from disk after writing)\n`;
     text += `File Count:      ${exportedFiles.length}\n`;
     text += `Total Size:      ${totalBytes} bytes\n`;
@@ -1040,7 +1040,7 @@ ${fileEntries}
 
     return {
       generated,
-      tool: 'SherlockMail v0.10.0',
+      tool: 'SherlockMail v0.10.1',
       algorithm: 'SHA-256',
       fileCount: exportedFiles.length,
       totalBytes,
