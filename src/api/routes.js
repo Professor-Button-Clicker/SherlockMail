@@ -12,7 +12,7 @@ import {
   saveFolders, replaceFolders, getFolderSummary, getFolders, createAcquisition, saveMessage, saveMessagesBatch, getMessages, getMessageCount,
   saveSearchQuery, getSearchQueries, saveExportRecord, getExportRecords, updateExportRecord,
   getAuditLog, getFullAuditLog, getStats, addAuditEntry,
-  getMessage, getAllProjectMessages, getProjectMessageKeys, updateAcquisition, getAcquisitions,
+  getMessage, getAllProjectMessages, iterateProjectMessages, getProjectMessageKeys, updateAcquisition, getAcquisitions,
   saveAttachment, getAttachments, getProjectAttachments,
   saveDriveLink, getDriveLinks, setAttachmentLocalPath,
   getTimestampRecords,
@@ -27,7 +27,7 @@ import { GraphHandler } from '../protocols/graph-handler.js';
 import { GmailHandler } from '../protocols/gmail-handler.js';
 import { ZohoHandler } from '../protocols/zoho-handler.js';
 import { JmapHandler } from '../protocols/jmap-handler.js';
-import { ExportService } from '../services/export-service.js';
+import { ExportService, setMessageLoader } from '../services/export-service.js';
 import { convertFilesToPst, itemMapCsv } from '../services/pst/pst-export.js';
 import { InlineSearchEngine } from '../services/inline-search.js';
 import { QualityControlService } from '../services/quality-control.js';
@@ -110,6 +110,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
 
 const router = Router();
+
+// Exports load a message's text only when they print it (case-wide rows leave it out).
+setMessageLoader(id => getMessage(id));
 
 // A handler that throws or rejects must fail that one request, never the whole program: a collection for
 // another project may be running in this process. Rejections go to the error handler at the end of this file.
@@ -1629,9 +1632,8 @@ async function runCollectionJob(ctx) {
       publish();
       const linkedTick = setInterval(publish, 1000);
       try {
-        const collected = getAllProjectMessages(project.id).filter(m => m.acquisition_id === acquisitionId);
         linkedResult = await collectLinkedFiles({
-          messages: collected, outDir: sessionDir, signal, progress, log: line => live.write(line),
+          messages: iterateProjectMessages(project.id, { acquisitionId }), outDir: sessionDir, signal, progress, log: line => live.write(line),
           onRecord: r => {
             for (const m of r.messages) {
               saveDriveLink({
@@ -1854,7 +1856,7 @@ async function runCollectionJob(ctx) {
     if (!fatal && !canceled && acquired > 0 && exportFormats.length) {
       progress.phase = 'exporting';
       publish();
-      const messages = getAllProjectMessages(project.id).filter(m => m.acquisition_id === acquisitionId);
+      const messages = getAllProjectMessages(project.id, { acquisitionId });
       for (const format of exportFormats) {
         progress.statusDetail = `Exporting ${format.toUpperCase()}`;
         publish();
@@ -2043,7 +2045,7 @@ router.post('/projects/:id/inline-search', (req, res) => {
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
   const { query } = req.body;
-  const messages = getAllProjectMessages(project.id);
+  const messages = getAllProjectMessages(project.id, { withColumns: ['body_text'] });
   const attachmentsByMessage = new Map();
   for (const a of getProjectAttachments(project.id)) {
     if (!attachmentsByMessage.has(a.message_id)) attachmentsByMessage.set(a.message_id, []);
@@ -2217,8 +2219,7 @@ router.post('/projects/:id/cloud-scan', (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  const messages = getAllProjectMessages(project.id);
-  const result = CloudAttachmentService.scanMessages(messages);
+  const result = CloudAttachmentService.scanMessages(iterateProjectMessages(project.id));
 
   const known = new Set(getDriveLinks(project.id).map(l => `${l.message_id}|${l.url}`));
   for (const link of result.links) {
@@ -2429,7 +2430,7 @@ router.get('/projects/:id/analytics/dedup', (req, res) => {
   const project = getProject(req.params.id);
   if (!project) return res.status(404).json({ error: 'Project not found' });
 
-  const messages = getAllProjectMessages(project.id);
+  const messages = getAllProjectMessages(project.id, { bodyPreview: 500 });
   const hashGroups = {};
   const contentGroups = {};
 
@@ -3130,7 +3131,7 @@ router.post('/projects/:id/import', async (req, res) => {
   const options = { targetFolder: targetFolder || undefined, outputDir, acquisitionId, format: kind, unquoteMbox, save: batch => saveMessagesBatch(batch) };
   try {
     const result = kind === 'pst' ? await LocalImportService.importPst(filePath, project.id, options) : await LocalImportService.importMail(filePath, project.id, options);
-    const collected = getAllProjectMessages(project.id).filter(m => m.acquisition_id === acquisitionId);
+    const collected = getAllProjectMessages(project.id, { acquisitionId });
     const totalBytes = collected.reduce((sum, m) => sum + (m.size || 0), 0);
     const status = !result.successful && (result.failed || result.folderErrors) ? 'failed' : (result.failed || result.folderErrors) ? 'completed_with_errors' : 'completed';
     const completionType = status === 'completed' ? 'completed_without_errors' : status === 'failed' ? 'fatal_error' : 'completed_with_errors_remaining_items';
@@ -3272,7 +3273,7 @@ router.post('/projects/:id/cloud-attachments/download', async (req, res) => {
     const log = [];
     const known = new Map();
     const result = await collectLinkedFiles({
-      messages: getAllProjectMessages(project.id), outDir, progress: {}, log: line => log.push(line),
+      messages: iterateProjectMessages(project.id), outDir, progress: {}, log: line => log.push(line),
       onRecord: r => {
         for (const m of r.messages) {
           const key = `${m.id}|${r.url}`;
@@ -3515,7 +3516,7 @@ router.get('/projects/:id/search/pre-acquisition', (req, res) => {
 // Feature 22: Full-Text Index Search
 router.post('/projects/:id/search/index', (req, res) => {
   try {
-    const messages = getAllProjectMessages(req.params.id);
+    const messages = iterateProjectMessages(req.params.id);
     let indexed = 0;
     clearSearchIndex(req.params.id);
     for (const msg of messages) {
@@ -3954,7 +3955,7 @@ router.get('/metadata-export/types', (req, res) => {
 
 function metadataRows(projectId, type) {
   switch (type) {
-    case 'email': return getAllProjectMessages(projectId);
+    case 'email': return getAllProjectMessages(projectId, { withColumns: ['headers_json'], bodyPreview: 200 });
     case 'attachment': return getProjectAttachments(projectId);
     case 'calendar': return getCalendarEvents(projectId);
     case 'contact': return getContacts(projectId);

@@ -11,6 +11,15 @@ import { threadMessages } from './threading.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SHERLOCKMAIL_DATA_DIR || path.join(__dirname, '..', '..', 'data');
 
+// Case-wide message rows leave the large text columns out (headers_summary marks such a row). An export that
+// prints a message's text loads that one message in full when it reaches it, so a large case never has all
+// of its text in memory at once. routes.js sets the loader.
+let loadFullMessage = null;
+export function setMessageLoader(fn) { loadFullMessage = fn; }
+function withText(message) {
+  return message?.headers_summary && loadFullMessage ? (loadFullMessage(message.id) || message) : message;
+}
+
 export class ExportService {
 
   static getFormats() {
@@ -359,8 +368,9 @@ export class ExportService {
     const date = message.date;
     const msgId = message.message_id || message.messageId || `<${uuidv4()}@sherlock-mail.local>`;
     const sha256 = message.hash_sha256 || message.hashSha256 || '';
-    const bodyText = message.body_text || message.bodyText || '';
-    const bodyHtml = message.body_html || message.bodyHtml || '';
+    const text = withText(message);
+    const bodyText = text.body_text || text.bodyText || '';
+    const bodyHtml = text.body_html || text.bodyHtml || '';
     const contentType = message.content_type || message.contentType || 'text/plain; charset=utf-8';
     const acquired = message.acquired_at || new Date().toISOString();
 
@@ -643,9 +653,10 @@ export class ExportService {
       const subject = msg.subject || '(no subject)';
       const date = msg.date ? new Date(msg.date).toISOString() : 'No date in the message';
       const sha256 = msg.hash_sha256 || msg.hashSha256 || 'N/A';
-      const body = msg.body_text || msg.bodyText || '';
+      const text = withText(msg);
+      const body = text.body_text || text.bodyText || '';
       let headers = null;
-      try { headers = JSON.parse(msg.headers_json || 'null'); } catch { /* the record's own fields still print */ }
+      try { headers = JSON.parse(text.headers_json || 'null'); } catch { /* the record's own fields still print */ }
       const atts = attachmentsByMessage?.get(msg.id) || [];
 
       if (curY < margin + lineHeight * 8) flushPage();
@@ -751,7 +762,8 @@ export class ExportService {
       const parentId = msg.in_reply_to || '';
       const md5 = msg.hash_md5 || msg.hashMd5 || '';
       const sha256 = msg.hash_sha256 || msg.hashSha256 || '';
-      const body = (msg.body_text || msg.bodyText || '').substring(0, 32000).replace(/\r?\n/g, NEWLINE);
+      const text = withText(msg);
+      const body = (text.body_text || text.bodyText || '').substring(0, 32000).replace(/\r?\n/g, NEWLINE);
 
       // Attachments stay inside their message, so a family's range is the message's own number.
       const vals = [msg.id, batesBegin, batesEnd, batesBegin, batesEnd,
@@ -801,7 +813,8 @@ export class ExportService {
       const to = parseJsonField(msg.to_addresses || msg.toAddresses, []);
       const cc = parseJsonField(msg.cc_addresses || msg.ccAddresses, []);
       const bcc = parseJsonField(msg.bcc_addresses || msg.bccAddresses, []);
-      const body = msg.body_text || msg.bodyText || '';
+      const text = withText(msg);
+      const body = text.body_text || text.bodyText || '';
 
       return `  <message seq="${idx + 1}" id="${x(msg.id)}">
     <subject>${x(msg.subject || '')}</subject>

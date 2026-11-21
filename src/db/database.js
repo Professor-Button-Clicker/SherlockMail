@@ -537,8 +537,51 @@ export function saveRecordCorrections(updates, audit) {
   }
 }
 
-export function getAllProjectMessages(projectId) {
-  return getDb().prepare('SELECT * FROM messages WHERE project_id = ? ORDER BY date DESC').all(projectId);
+// The decoded text of each message. A 40,000-message mailbox holds several GB of it, more than the app's
+// memory allows at once, so "every message of a case" leaves these out unless a caller asks for one.
+const TEXT_COLUMNS = ['body_text', 'body_html', 'headers_json'];
+const messageColumnCache = new Map();
+
+// Columns for a case-wide message query: every column except the text ones, plus small facts derived from
+// them in the database, so checks that need only those facts never load the text:
+//   has_body        - the message has a text or HTML body
+//   body_has_pkcs7  - the text body contains "BEGIN PKCS7"
+//   headers_json    - only the header fields read case-wide (date, references); headers_summary = 1 says so
+// withColumns names text columns to include whole; bodyPreview: N includes the first N characters of
+// body_text as body_text (body_preview = N says so).
+function messageColumns({ withColumns = [], bodyPreview = 0 } = {}) {
+  const key = `${withColumns.join(',')}|${bodyPreview}`;
+  if (!messageColumnCache.has(key)) {
+    const all = getDb().prepare("SELECT name FROM pragma_table_info('messages')").all().map(c => c.name);
+    const cols = all.filter(c => !TEXT_COLUMNS.includes(c) || withColumns.includes(c)).map(c => `"${c}"`);
+    cols.push(`(COALESCE(body_text, '') <> '' OR COALESCE(body_html, '') <> '') AS has_body`);
+    cols.push(`instr(COALESCE(body_text, ''), 'BEGIN PKCS7') > 0 AS body_has_pkcs7`);
+    if (!withColumns.includes('headers_json')) {
+      cols.push(`CASE WHEN json_valid(headers_json) THEN json_object('date', json_extract(headers_json, '$.date'), 'references', json(headers_json -> '$.references')) END AS headers_json`);
+      cols.push('1 AS headers_summary');
+    }
+    if (bodyPreview > 0 && !withColumns.includes('body_text')) {
+      cols.push(`substr(body_text, 1, ${Number(bodyPreview) | 0}) AS body_text`, `${Number(bodyPreview) | 0} AS body_preview`);
+    }
+    messageColumnCache.set(key, cols.join(', '));
+  }
+  return messageColumnCache.get(key);
+}
+
+/**
+ * Every message of a project (or of one acquisition), newest first, without the large text columns unless
+ * asked for (see messageColumns). A caller that needs each message's full text uses iterateProjectMessages.
+ */
+export function getAllProjectMessages(projectId, { acquisitionId = null, withColumns, bodyPreview } = {}) {
+  const where = acquisitionId ? 'project_id = ? AND acquisition_id = ?' : 'project_id = ?';
+  return getDb().prepare(`SELECT ${messageColumns({ withColumns, bodyPreview })} FROM messages WHERE ${where} ORDER BY date DESC`)
+    .all(...(acquisitionId ? [projectId, acquisitionId] : [projectId]));
+}
+
+// Every column of every message, one row at a time, so only one message's text is in memory at once.
+export function* iterateProjectMessages(projectId, { acquisitionId = null } = {}) {
+  const where = acquisitionId ? 'project_id = ? AND acquisition_id = ?' : 'project_id = ?';
+  yield* getDb().prepare(`SELECT * FROM messages WHERE ${where} ORDER BY date DESC`).iterate(...(acquisitionId ? [projectId, acquisitionId] : [projectId]));
 }
 
 export function updateAcquisition(id, data) {

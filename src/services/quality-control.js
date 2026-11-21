@@ -277,7 +277,8 @@ export class QualityControlService {
     for (const m of messages) {
       if (!m.subject && !(m.subject === '(no subject)')) noSubject++;
       if (!(m.from_address || m.fromAddress)) noFrom++;
-      if (!(m.body_text || m.bodyText || m.body_html || m.bodyHtml)) noBody++;
+      // Case-wide rows carry has_body instead of the bodies themselves (see getAllProjectMessages).
+      if (!(m.has_body ?? (m.body_text || m.bodyText || m.body_html || m.bodyHtml))) noBody++;
     }
 
     check.metrics = { noSubject, noFrom, noBody, total: messages.length };
@@ -408,7 +409,7 @@ export class QualityControlService {
       if (m.is_signed) signed++;
       const ct = m.content_type || m.contentType || '';
       const body = m.body_text || m.bodyText || '';
-      if (ct.includes('pkcs7') || ct.includes('smime') || body.includes('BEGIN PKCS7')) smimeDetected++;
+      if (ct.includes('pkcs7') || ct.includes('smime') || m.body_has_pkcs7 || body.includes('BEGIN PKCS7')) smimeDetected++;
     }
 
     check.metrics = { encrypted, signed, smimeDetected, notChecked, total: messages.length };
