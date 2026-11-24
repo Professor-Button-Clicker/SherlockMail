@@ -583,7 +583,7 @@ router.get('/projects/:id/collect/events', (req, res) => {
 // ── Dashboard Stats ──
 router.get('/stats', (req, res) => {
   const stats = getStats();
-  stats.version = '0.10.3';
+  stats.version = '0.10.4';
   stats.nodeVersion = process.versions.node;
   res.json(stats);
 });
@@ -2634,7 +2634,7 @@ router.get('/projects/:id/chain-of-custody', (req, res) => {
     reportVersion: '1.0',
     toolInfo: {
       name: 'SherlockMail',
-      version: '0.10.3',
+      version: '0.10.4',
       description: 'Forensic email collection tool',
     },
     caseInfo: {
@@ -2903,7 +2903,7 @@ router.get('/projects/:id/verify', async (req, res) => {
 
   const verification = {
     timestamp: new Date().toISOString(),
-    toolVersion: '0.10.3',
+    toolVersion: '0.10.4',
     projectId: req.params.id,
     projectName: project.name,
     examiner: project.examiner_name,

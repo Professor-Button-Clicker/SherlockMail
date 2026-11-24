@@ -231,7 +231,7 @@ export class CryptoService {
 
   static exportProfile(profile) {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<imapProfile version="1.0" generator="SherlockMail v0.10.3">
+<imapProfile version="1.0" generator="SherlockMail v0.10.4">
   <name>${this._xmlEscape(profile.name)}</name>
   <host>${this._xmlEscape(profile.host)}</host>
   <port>${profile.port || 993}</port>
