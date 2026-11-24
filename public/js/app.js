@@ -455,9 +455,9 @@ function renderTrackerCase() {
           <tr>
             <th>Project</th>
             <th>Target Email</th>
-            <th>Examiner</th>
             <th>Custodian</th>
             <th>Evidence ID</th>
+            <th>Examiner</th>
             <th>Status</th>
             <th>Messages</th>
             <th>Attachments</th>
@@ -474,9 +474,9 @@ function renderTrackerCase() {
             <tr class="tracker-row${terms.length && trackerProjectMatches(p, terms) ? ' tracker-row-match' : ''}" onclick="selectProject('${p.id}')" style="cursor:pointer">
               <td><strong>${esc(p.name)}</strong></td>
               <td>${esc(p.target_email)}</td>
-              <td>${p.examiner_name ? esc(p.examiner_name) : '—'}</td>
               <td>${p.custodian_name ? esc(p.custodian_name) : '—'}</td>
               <td>${p.evidence_id ? esc(p.evidence_id) : '—'}</td>
+              <td>${p.examiner_name ? esc(p.examiner_name) : '—'}</td>
               <td><span class="project-status ${statusClass(p.status)}">${displayStatus(p.status)}</span></td>
               <td style="text-align:right">${(p.message_count || 0).toLocaleString()}</td>
               <td style="text-align:right">${(p.attachment_count || 0).toLocaleString()}</td>
