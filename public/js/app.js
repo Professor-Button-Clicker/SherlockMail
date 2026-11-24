@@ -456,6 +456,7 @@ function renderTrackerCase() {
             <th>Project</th>
             <th>Target Email</th>
             <th>Examiner</th>
+            <th>Custodian</th>
             <th>Evidence ID</th>
             <th>Status</th>
             <th>Messages</th>
@@ -474,6 +475,7 @@ function renderTrackerCase() {
               <td><strong>${esc(p.name)}</strong></td>
               <td>${esc(p.target_email)}</td>
               <td>${p.examiner_name ? esc(p.examiner_name) : '—'}</td>
+              <td>${p.custodian_name ? esc(p.custodian_name) : '—'}</td>
               <td>${p.evidence_id ? esc(p.evidence_id) : '—'}</td>
               <td><span class="project-status ${statusClass(p.status)}">${displayStatus(p.status)}</span></td>
               <td style="text-align:right">${(p.message_count || 0).toLocaleString()}</td>
@@ -490,6 +492,7 @@ function renderTrackerCase() {
         <tfoot>
           <tr style="font-weight:600;border-top:2px solid var(--border)">
             <td>Total: ${projects.length} project${projects.length !== 1 ? 's' : ''}</td>
+            <td></td>
             <td></td>
             <td></td>
             <td></td>
