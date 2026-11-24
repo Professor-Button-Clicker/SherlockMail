@@ -900,6 +900,8 @@ button { font: inherit; color: inherit; }
   font-weight: 600;
 }
 
+.tracker-case-title { margin: 0 0 12px; font-size: 18px; font-weight: 600; color: var(--text-primary); }
+
 .sub-panel { display: none; }
 .sub-panel.active { display: block; }
 

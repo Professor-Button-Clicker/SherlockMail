@@ -768,7 +768,11 @@ router.get('/projects', (req, res) => {
 });
 
 router.get('/projects-summary', (req, res) => {
-  res.json(getProjectsSummary());
+  // Evidence ID and custodian as the project screens and reports show them (an edit's value wins).
+  res.json(getProjectsSummary().map(p => {
+    const { evidenceId, custodianName } = caseFields(p);
+    return { ...p, evidence_id: evidenceId, custodian_name: custodianName };
+  }));
 });
 
 router.get('/projects/:id', (req, res) => {

@@ -295,6 +295,34 @@ async function loadSystemInfo() {
 }
 
 // --- Projects ---
+// One tracker per case number. Projects whose case numbers differ only in capitalization or surrounding
+// spaces are the same case; each case gets a tab named by its case number, and its tracker lists every
+// project (collection) filed under it.
+let trackerCases = [];
+let trackerCaseKey = null;
+const TRACKER_CASE_STORE = 'sherlock-tracker-case';
+const trackerKeyOf = p => (p.case_id || '').trim().toLowerCase();
+
+function groupTrackerCases(projects) {
+  const groups = new Map();
+  for (const p of projects) {
+    const key = trackerKeyOf(p);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  }
+  return [...groups].map(([key, list]) => {
+    // A case shown in several capitalizations is titled the way most of its projects write it; on a tie,
+    // the way its earliest project does.
+    const spellings = new Map();
+    for (const p of [...list].sort((a, b) => (a.created_at || '').localeCompare(b.created_at || ''))) {
+      const s = (p.case_id || '').trim();
+      spellings.set(s, (spellings.get(s) || 0) + 1);
+    }
+    const title = key ? [...spellings].reduce((best, cur) => (cur[1] > best[1] ? cur : best))[0] : 'No case number';
+    return { key, title, projects: list };
+  }).sort((a, b) => (!a.key - !b.key) || a.title.localeCompare(b.title, undefined, { numeric: true, sensitivity: 'base' }));
+}
+
 async function loadProjectsTracker() {
   const container = document.getElementById('tracker-content');
   try {
@@ -303,62 +331,104 @@ async function loadProjectsTracker() {
       container.innerHTML = '<p style="color:var(--text-muted)">No projects yet. Create a project to get started.</p>';
       return;
     }
-    const statusClass = s => `status-${displayStatus(s)}`;
+    trackerCases = groupTrackerCases(projects);
+    let remembered = null;
+    try { remembered = localStorage.getItem(TRACKER_CASE_STORE); } catch { /* no saved tab */ }
+    const wanted = [trackerCaseKey, remembered, currentProject ? trackerKeyOf(currentProject) : null];
+    trackerCaseKey = wanted.find(k => k != null && trackerCases.some(c => c.key === k)) ?? trackerCases[0].key;
     container.innerHTML = `
-      <div style="overflow-x:auto">
-        <table class="tracker-table">
-          <thead>
-            <tr>
-              <th>Project</th>
-              <th>Target Email</th>
-              <th>Status</th>
-              <th>Messages</th>
-              <th>Attachments</th>
-              <th>Size</th>
-              <th>Collections</th>
-              <th>Exports</th>
-              <th>Last Collected</th>
-              <th>Last Exported</th>
-              <th>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${projects.map(p => `
-              <tr class="tracker-row" onclick="selectProject('${p.id}')" style="cursor:pointer">
-                <td><strong>${esc(p.name)}</strong>${p.case_id ? `<br><span style="font-size:11px;color:var(--text-muted)">Case: ${esc(p.case_id)}</span>` : ''}</td>
-                <td>${esc(p.target_email)}</td>
-                <td><span class="project-status ${statusClass(p.status)}">${displayStatus(p.status)}</span></td>
-                <td style="text-align:right">${(p.message_count || 0).toLocaleString()}</td>
-                <td style="text-align:right">${(p.attachment_count || 0).toLocaleString()}</td>
-                <td style="text-align:right">${formatBytes(p.total_size || 0)}</td>
-                <td style="text-align:center">${p.acquisition_count || 0}</td>
-                <td style="text-align:center">${p.export_count || 0}</td>
-                <td>${p.last_collected ? new Date(p.last_collected).toLocaleDateString() : '—'}</td>
-                <td>${p.last_exported ? new Date(p.last_exported).toLocaleDateString() : '—'}</td>
-                <td>${new Date(p.created_at).toLocaleDateString()}</td>
-              </tr>
-            `).join('')}
-          </tbody>
-          <tfoot>
-            <tr style="font-weight:600;border-top:2px solid var(--border)">
-              <td>Total: ${projects.length} project${projects.length !== 1 ? 's' : ''}</td>
-              <td></td>
-              <td></td>
-              <td style="text-align:right">${projects.reduce((s, p) => s + (p.message_count || 0), 0).toLocaleString()}</td>
-              <td style="text-align:right">${projects.reduce((s, p) => s + (p.attachment_count || 0), 0).toLocaleString()}</td>
-              <td style="text-align:right">${formatBytes(projects.reduce((s, p) => s + (p.total_size || 0), 0))}</td>
-              <td style="text-align:center">${projects.reduce((s, p) => s + (p.acquisition_count || 0), 0)}</td>
-              <td style="text-align:center">${projects.reduce((s, p) => s + (p.export_count || 0), 0)}</td>
-              <td></td>
-              <td></td>
-              <td></td>
-            </tr>
-          </tfoot>
-        </table>
-      </div>`;
+      <div class="sub-tabs" id="tracker-case-tabs" role="tablist">
+        ${trackerCases.map((c, i) => `<div class="sub-tab" role="tab" tabindex="0" data-index="${i}"
+          onclick="selectTrackerCase(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectTrackerCase(${i})}"
+          title="${c.projects.length} project${c.projects.length !== 1 ? 's' : ''}">${esc(c.title)}</div>`).join('')}
+      </div>
+      <div id="tracker-case-panel"></div>`;
+    renderTrackerCase();
   } catch (err) {
     container.innerHTML = `<p style="color:var(--danger)">Failed to load projects: ${esc(err.message)}</p>`;
   }
+}
+
+function selectTrackerCase(index) {
+  const c = trackerCases[index];
+  if (!c) return;
+  trackerCaseKey = c.key;
+  try { localStorage.setItem(TRACKER_CASE_STORE, c.key); } catch { /* remembered for this visit only */ }
+  renderTrackerCase();
+}
+
+function renderTrackerCase() {
+  const index = trackerCases.findIndex(c => c.key === trackerCaseKey);
+  const c = trackerCases[index];
+  document.querySelectorAll('#tracker-case-tabs .sub-tab').forEach(t => {
+    const on = Number(t.dataset.index) === index;
+    t.classList.toggle('active', on);
+    t.setAttribute('aria-selected', String(on));
+  });
+  const panel = document.getElementById('tracker-case-panel');
+  if (!c || !panel) return;
+  const projects = c.projects;
+  const statusClass = s => `status-${displayStatus(s)}`;
+  const sum = f => projects.reduce((s, p) => s + (p[f] || 0), 0);
+  panel.innerHTML = `
+    <h3 class="tracker-case-title">${esc(c.title)}</h3>
+    <div style="overflow-x:auto">
+      <table class="tracker-table">
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th>Target Email</th>
+            <th>Examiner</th>
+            <th>Evidence ID</th>
+            <th>Status</th>
+            <th>Messages</th>
+            <th>Attachments</th>
+            <th>Size</th>
+            <th>Collections</th>
+            <th>Exports</th>
+            <th>Last Collected</th>
+            <th>Last Exported</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${projects.map(p => `
+            <tr class="tracker-row" onclick="selectProject('${p.id}')" style="cursor:pointer">
+              <td><strong>${esc(p.name)}</strong></td>
+              <td>${esc(p.target_email)}</td>
+              <td>${p.examiner_name ? esc(p.examiner_name) : '—'}</td>
+              <td>${p.evidence_id ? esc(p.evidence_id) : '—'}</td>
+              <td><span class="project-status ${statusClass(p.status)}">${displayStatus(p.status)}</span></td>
+              <td style="text-align:right">${(p.message_count || 0).toLocaleString()}</td>
+              <td style="text-align:right">${(p.attachment_count || 0).toLocaleString()}</td>
+              <td style="text-align:right">${formatBytes(p.total_size || 0)}</td>
+              <td style="text-align:center">${p.acquisition_count || 0}</td>
+              <td style="text-align:center">${p.export_count || 0}</td>
+              <td>${p.last_collected ? new Date(p.last_collected).toLocaleDateString() : '—'}</td>
+              <td>${p.last_exported ? new Date(p.last_exported).toLocaleDateString() : '—'}</td>
+              <td>${new Date(p.created_at).toLocaleDateString()}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+        <tfoot>
+          <tr style="font-weight:600;border-top:2px solid var(--border)">
+            <td>Total: ${projects.length} project${projects.length !== 1 ? 's' : ''}</td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td></td>
+            <td style="text-align:right">${sum('message_count').toLocaleString()}</td>
+            <td style="text-align:right">${sum('attachment_count').toLocaleString()}</td>
+            <td style="text-align:right">${formatBytes(sum('total_size'))}</td>
+            <td style="text-align:center">${sum('acquisition_count')}</td>
+            <td style="text-align:center">${sum('export_count')}</td>
+            <td></td>
+            <td></td>
+            <td></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>`;
 }
 
 async function selectProject(id) {
