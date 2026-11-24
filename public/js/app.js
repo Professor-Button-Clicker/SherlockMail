@@ -296,12 +296,31 @@ async function loadSystemInfo() {
 
 // --- Projects ---
 // One tracker per case number. Projects whose case numbers differ only in capitalization or surrounding
-// spaces are the same case; each case gets a tab named by its case number, and its tracker lists every
-// project (collection) filed under it.
+// spaces are the same case; each case gets a tab (a vertical list) named by its case number, and its
+// tracker lists every project (collection) filed under it. The search box narrows the list to cases with
+// a project matching every word typed, in any of the project's details.
 let trackerCases = [];
 let trackerCaseKey = null;
+let trackerQuery = '';
 const TRACKER_CASE_STORE = 'sherlock-tracker-case';
 const trackerKeyOf = p => (p.case_id || '').trim().toLowerCase();
+
+// Every detail of a project that the search looks in.
+function trackerSearchText(p) {
+  return [
+    p.name, p.target_email, p.provider_type, p.case_name, p.case_id, p.examiner_name, p.agency, p.evidence_id,
+    p.custodian_name, p.evidence_description, p.client_name, p.client_matter_no, p.legal_authority, p.legal_scope,
+    displayStatus(p.status),
+  ].filter(Boolean).join('\n').toLowerCase();
+}
+
+function trackerProjectMatches(p, terms) {
+  if (!terms.length) return true;
+  const text = p._search || (p._search = trackerSearchText(p));
+  return terms.every(t => text.includes(t));
+}
+
+const trackerTerms = () => trackerQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
 function groupTrackerCases(projects) {
   const groups = new Map();
@@ -337,16 +356,57 @@ async function loadProjectsTracker() {
     const wanted = [trackerCaseKey, remembered, currentProject ? trackerKeyOf(currentProject) : null];
     trackerCaseKey = wanted.find(k => k != null && trackerCases.some(c => c.key === k)) ?? trackerCases[0].key;
     container.innerHTML = `
-      <div class="sub-tabs" id="tracker-case-tabs" role="tablist">
-        ${trackerCases.map((c, i) => `<div class="sub-tab" role="tab" tabindex="0" data-index="${i}"
-          onclick="selectTrackerCase(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();selectTrackerCase(${i})}"
-          title="${c.projects.length} project${c.projects.length !== 1 ? 's' : ''}">${esc(c.title)}</div>`).join('')}
-      </div>
-      <div id="tracker-case-panel"></div>`;
-    renderTrackerCase();
+      <div class="tracker-layout">
+        <aside class="tracker-side">
+          <label class="tracker-search-label" for="tracker-search">Find a case</label>
+          <input type="search" id="tracker-search" class="tracker-search" placeholder="Search any project detail" autocomplete="off"
+            value="${esc(trackerQuery)}" oninput="filterTrackerCases(this.value)">
+          <div class="tracker-search-count" id="tracker-search-count" aria-live="polite"></div>
+          <div class="tracker-case-list" id="tracker-case-tabs" role="tablist" aria-orientation="vertical" aria-label="Cases"
+            onkeydown="trackerTabKey(event)"></div>
+        </aside>
+        <section class="tracker-case-panel" id="tracker-case-panel" role="tabpanel"></section>
+      </div>`;
+    renderTrackerCaseList();
   } catch (err) {
     container.innerHTML = `<p style="color:var(--danger)">Failed to load projects: ${esc(err.message)}</p>`;
   }
+}
+
+function filterTrackerCases(value) {
+  trackerQuery = value;
+  renderTrackerCaseList();
+}
+
+// The cases the list shows: all of them, or those with a project matching the search.
+function visibleTrackerCases() {
+  const terms = trackerTerms();
+  return trackerCases.map((c, index) => ({ c, index, hits: c.projects.filter(p => trackerProjectMatches(p, terms)).length }))
+    .filter(v => !terms.length || v.hits > 0);
+}
+
+function renderTrackerCaseList() {
+  const list = document.getElementById('tracker-case-tabs');
+  if (!list) return;
+  const visible = visibleTrackerCases();
+  const searching = trackerTerms().length > 0;
+  // The open case stays open while it matches; otherwise the first match opens.
+  if (visible.length && !visible.some(v => v.c.key === trackerCaseKey)) trackerCaseKey = visible[0].c.key;
+  document.getElementById('tracker-search-count').textContent = searching
+    ? `${visible.length} of ${trackerCases.length} case${trackerCases.length !== 1 ? 's' : ''} match`
+    : `${trackerCases.length} case${trackerCases.length !== 1 ? 's' : ''}`;
+  list.innerHTML = visible.map(({ c, index, hits }) => `
+    <button type="button" class="tracker-case-tab" role="tab" data-index="${index}" onclick="selectTrackerCase(${index})"
+      title="${esc(c.title)}: ${c.projects.length} project${c.projects.length !== 1 ? 's' : ''}">
+      <span class="tracker-case-tab-name">${esc(c.title)}</span>
+      <span class="tracker-case-tab-count">${searching ? `${hits}/${c.projects.length}` : c.projects.length}</span>
+    </button>`).join('');
+  if (!visible.length) {
+    list.innerHTML = '';
+    document.getElementById('tracker-case-panel').innerHTML = `<p style="color:var(--text-muted)">No case has a project matching "${esc(trackerQuery.trim())}".</p>`;
+    return;
+  }
+  renderTrackerCase();
 }
 
 function selectTrackerCase(index) {
@@ -357,21 +417,38 @@ function selectTrackerCase(index) {
   renderTrackerCase();
 }
 
+// Up and down arrows move through the case list, as in any vertical tab list.
+function trackerTabKey(event) {
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+  const tabs = [...document.querySelectorAll('#tracker-case-tabs .tracker-case-tab')];
+  if (!tabs.length) return;
+  event.preventDefault();
+  const at = tabs.findIndex(t => t.classList.contains('active'));
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : Math.min(tabs.length - 1, Math.max(0, at + (event.key === 'ArrowDown' ? 1 : -1)));
+  selectTrackerCase(Number(tabs[next].dataset.index));
+  tabs[next].focus();
+}
+
 function renderTrackerCase() {
   const index = trackerCases.findIndex(c => c.key === trackerCaseKey);
   const c = trackerCases[index];
-  document.querySelectorAll('#tracker-case-tabs .sub-tab').forEach(t => {
+  document.querySelectorAll('#tracker-case-tabs .tracker-case-tab').forEach(t => {
     const on = Number(t.dataset.index) === index;
     t.classList.toggle('active', on);
     t.setAttribute('aria-selected', String(on));
+    t.tabIndex = on ? 0 : -1;
   });
   const panel = document.getElementById('tracker-case-panel');
   if (!c || !panel) return;
   const projects = c.projects;
+  const terms = trackerTerms();
+  const hits = terms.length ? projects.filter(p => trackerProjectMatches(p, terms)).length : 0;
   const statusClass = s => `status-${displayStatus(s)}`;
   const sum = f => projects.reduce((s, p) => s + (p[f] || 0), 0);
   panel.innerHTML = `
     <h3 class="tracker-case-title">${esc(c.title)}</h3>
+    ${terms.length ? `<p class="tracker-match-note">${hits} of ${projects.length} project${projects.length !== 1 ? 's' : ''} in this case ${hits === 1 ? 'matches' : 'match'} the search (marked).</p>` : ''}
     <div style="overflow-x:auto">
       <table class="tracker-table">
         <thead>
@@ -393,7 +470,7 @@ function renderTrackerCase() {
         </thead>
         <tbody>
           ${projects.map(p => `
-            <tr class="tracker-row" onclick="selectProject('${p.id}')" style="cursor:pointer">
+            <tr class="tracker-row${terms.length && trackerProjectMatches(p, terms) ? ' tracker-row-match' : ''}" onclick="selectProject('${p.id}')" style="cursor:pointer">
               <td><strong>${esc(p.name)}</strong></td>
               <td>${esc(p.target_email)}</td>
               <td>${p.examiner_name ? esc(p.examiner_name) : '—'}</td>
